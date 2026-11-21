@@ -6,12 +6,15 @@
 
 ## 用
 
-1. 轨道插 **TAP** → 右键 → `Capture` 打开
-2. 轨道录音模式 `Record: output (stereo)` → 按录音键
-3. 旋钮 ±24 dB（双击回 0）；右键菜单：`Capture`、`Zoom 50–300%`
+1. 轨道插 **TAP** → 面板空白处右键 → `Capture` 打勾（默认关）
+2. 轨道录音模式 `Record: output (stereo)`
+3. 按录音键
 
-**只录不响**（像 Live 那样）：轨道 `Route` → 取消 `Master send`。
-录音照样能录到，但 REAPER 不再把这条轨送进 master。
+**只录不响**（像 Live 那样）：轨道 `Route` → 取消 `Master send`，录音照样能录到。
+
+旋钮 ±24 dB（双击回 0）；右键菜单里还有 `Zoom 50–300%`。
+
+详细的 REAPER 设置、导出和排查 → **[docs/reaper.md](docs/reaper.md)**
 
 ## 装
 

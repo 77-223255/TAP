@@ -74,9 +74,9 @@ static DESC: clap_plugin_descriptor = clap_plugin_descriptor {
     id: b"dev.tap.capture\0".as_ptr() as *const c_char,
     name: b"TAP\0".as_ptr() as *const c_char,
     vendor: b"shienze\0".as_ptr() as *const c_char,
-    url: b"https://github.com/77-223255/neilu\0".as_ptr() as *const c_char,
-    manual_url: b"https://github.com/77-223255/neilu#readme\0".as_ptr() as *const c_char,
-    support_url: b"https://github.com/77-223255/neilu/issues\0".as_ptr() as *const c_char,
+    url: b"https://github.com/77-223255/tap\0".as_ptr() as *const c_char,
+    manual_url: b"https://github.com/77-223255/tap#readme\0".as_ptr() as *const c_char,
+    support_url: b"https://github.com/77-223255/tap/issues\0".as_ptr() as *const c_char,
     version: concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const c_char,
     description: b"System audio (default sink monitor) straight into your DAW track\0".as_ptr()
         as *const c_char,
