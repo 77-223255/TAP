@@ -474,6 +474,8 @@ pub struct View {
     pub zoom: i32,
     pub error: Option<String>,
     pub dropped: u64,
+    /// 正在被捕获的应用名
+    pub apps: Vec<String>,
 }
 
 impl View {
@@ -491,6 +493,7 @@ impl View {
             zoom: ctl.zoom(),
             error: if err.is_empty() { None } else { Some(err) },
             dropped: cap.dropped_frames(),
+            apps: cap.apps(),
         }
     }
 }
@@ -1179,11 +1182,22 @@ fn paint(p: &mut Painter, v: &View, l: &mut Layout) {
     }
 
     // ───────── 底栏
-    if p.cjk {
-        p.text(PAD, BASE_H - 30.0, 9.0, 0.4, "跟随系统默认输出（sink monitor）", dim2());
+    // 正在抓谁：所有应用播放流（宿主的输出被排除，所以不会啸叫）
+    let apps_line = if v.apps.is_empty() {
+        if p.cjk {
+            "APPS · 没有应用在放声音".to_string()
+        } else {
+            "APPS · nothing playing".to_string()
+        }
     } else {
-        p.text(PAD, BASE_H - 30.0, 9.0, 0.4, "system default output (sink monitor)", dim2());
-    }
+        let mut names = v.apps.join(", ");
+        if names.chars().count() > 46 {
+            names = format!("{} 等 {} 个", v.apps[0], v.apps.len());
+        }
+        format!("APPS · {names}")
+    };
+    let shown = truncate(p, &apps_line, 300.0, 9.0, 0.4);
+    p.text(PAD, BASE_H - 30.0, 9.0, 0.4, &shown, dim2());
     let ms = v.buffer_secs * 1000.0;
     p.text(
         PAD,

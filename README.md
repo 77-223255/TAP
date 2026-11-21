@@ -15,13 +15,20 @@ Linux / PipeWire 专用的 CLAP 插件。装上、点一下，轨道就开始长
 不需要选输入源，没有 loopback 设备也照样能用。所以界面上没有设备列表、没有开关按钮：
 插上就抓，宿主要开始处理时它就在跑。
 
-## 为什么需要它
+## 为什么这么设计（重要）
 
-USB 声卡（比如 Steinberg UR12）在 Linux 上没有硬件 loopback，`dspMixFx` 那套是 Windows 驱动的功能。
-想在 Linux 里内录，通常得命令行把 PipeWire 的 monitor 录成 wav 再拖回工程。
+最直觉的做法是「抓 sink 的 monitor」。**那样一定会啸叫**：monitor 里包含宿主自己的输出，
+于是 插件输出 → 声卡 → monitor → 插件输入 形成增益为 1 的环路，几秒内就炸。
 
-TAP 把这件事搬进插件：它自己作为 PipeWire 客户端去抓任意 Sink 的 monitor，
-把音频吐到插件输出端口，「录进轨道」就变成普通的录音动作。
+Ardour 论坛和 OBS 社区对这件事的结论一致：抓 monitor 就必须断开宿主输出、
+或者另建虚拟 sink、或者靠“关监听 + 静音轨道”来躲。都不适合「插上就用」。
+
+所以 TAP 走 OBS 的 *Application Audio Capture* 那条路：
+
+> **不抓 monitor。把每个应用的播放流节点直接连进插件的输入口，并显式排除本进程（宿主自己）。**
+
+于是宿主的输出永远不会被自己抓回来 —— **结构上不可能成环**，
+不需要虚拟声卡、不需要关监听、不需要静音轨道，也可以边录边听。
 
 ## 用法（REAPER 为例）
 
@@ -29,8 +36,10 @@ TAP 把这件事搬进插件：它自己作为 PipeWire 客户端去抓任意 Si
 2. 轨道录音模式：右键录音按钮 / 右键轨道 → `Record: output (stereo)`，
    **再点一次选择子模式**：`post fader` / `post-fx pre-fader` / `pre fx`
    （想没了推子影响就选 `post-fx pre-fader`）
-3. 想边录边听：打开轨道的 **录音监听**（Record monitoring）
+3. 想边录边听就打开轨道的 **录音监听**（现在是安全的，不会啸叫）
 4. 按录音键。轨道上就会出现捕获到的音频
+
+底栏 `APPS · …` 会列出当前正在被捕获的应用；空着说明没有应用在发声。
 
 想单独抓某个程序（浏览器、播放器）：把它指到某个输出设备，然后在列表里选那个设备。
 
@@ -76,13 +85,17 @@ cargo build --release
 ## 工作原理
 
 ```
-PipeWire 线程 ──pw_stream(sink monitor)──▶ 无锁环形缓冲 ──▶ 音频线程 ──▶ 插件输出端口
-                                                     ▲
-                                             按填充量微调播放速率
-                                            （和 DAW 时钟的漂移补偿）
+应用播放流 ──link-factory──▶ TAP 的输入口 ──▶ 无锁环形缓冲 ──▶ 音频线程 ──▶ 插件输出端口
+（宿主的流被排除）                                    ▲
+                                              按填充量微调播放速率
+                                             （和 DAW 时钟的漂移补偿）
 ```
 
-- 抓 monitor 用 `stream.capture.sink = true`（跟随系统默认输出）
+- 枚举 registry 里的节点：`media.class == "Stream/Output/Audio"` 就是应用播放流；
+  节点的 props 里常常没有 pid，要顺着 `client.id` 去 Client 对象上找
+  `application.process.id`（兜底 `pipewire.sec.pid`），和 `std::process::id()` 比较来排除宿主
+- 端口对端口用 `link-factory` 连接（`link.output.port` / `link.input.port`），
+  单声道应用会同时接左右两路；节点/端口增删由 registry 事件驱动，250ms 兜底重扫一次
 - `process()` 成功必须返回 `CLAP_PROCESS_CONTINUE`(1)。返回 0 是 `CLAP_PROCESS_ERROR`，
   宿主会把这一块的输出 buffer **整个人丢掉**——这也是「插件有电平、轨道没声音」的原因之一
 - 输出 buffer 的 `constant_mask` 必须自己清零。宿主从不清理这个字段，而它代表
@@ -96,7 +109,8 @@ PipeWire 线程 ──pw_stream(sink monitor)──▶ 无锁环形缓冲 ──
 ## 已知限制
 
 - 只支持 X11 窗口（Wayland 原生窗口没做，REAPER 本身走 XWayland 所以没问题）
-- 只抓系统默认输出。想单独抓某个程序，就把它指到默认输出设备
+- 抓的是**所有**应用播放流（除宿主自己），暂时不能只挑某一个应用
+- 有些声音不走应用播放流（极少数直接写给 sink 的东西），抓不到
 - 只发 CLAP，不打算做 VST3 / LV2 —— `Cargo.toml` 里的 `rlib` 只是给 examples / 测试用，不是插件格式
 - 只在 REAPER + PipeWire 1.6 / Hyprland 上验证过，其他 CLAP 宿主理论上也能用
 - 没有 Windows / macOS 支持（这两边本来就不需要它）
@@ -106,7 +120,9 @@ PipeWire 线程 ──pw_stream(sink monitor)──▶ 无锁环形缓冲 ──
 ```bash
 # 不开 DAW，直接验证 PipeWire 这一侧抓没抓到声音
 cargo run --release --example probe
-cargo run --release --example probe -- Loopback      # 抓指定 sink
+
+# 自测：本进程自己放音 2 秒，应当一帧都抓不到（证明宿主输出被排除 → 不会啸叫）
+cargo run --release --example selftest
 
 # 重新渲染 README 的预览图（第二个参数是 ZOOM 档位 0..5）
 cargo run --release --example preview -- docs/preview.png 1

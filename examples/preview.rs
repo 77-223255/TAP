@@ -29,6 +29,7 @@ fn main() {
         zoom,
         error: None,
         dropped: 0,
+        apps: vec!["Chromium".to_string(), "Spotify".to_string()],
     };
 
     match render_png(std::path::Path::new(&out), &v) {
