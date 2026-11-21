@@ -1,10 +1,13 @@
-//! 把界面渲染成 PNG，用来生成 README 的预览图：
+//! 渲染预览图：
 //!
 //! ```bash
-//! cargo run --release --example preview -- docs/preview.png [zoom 0..5]
+//! cargo run --release --example preview -- docs/preview.png [zoom 0..5] [menu]
 //! ```
+//!
+//! 第三个参数给 `menu` 就把右键菜单也画上。
 
-use tap::gui::{render_png, View};
+use tap::ctl::Ctl;
+use tap::gui::{render_png, render_png_with_menu, View};
 
 fn main() {
     let out = std::env::args()
@@ -15,21 +18,33 @@ fn main() {
         .and_then(|z| z.parse::<i32>().ok())
         .unwrap_or(1)
         .clamp(0, 5);
+    let with_menu = std::env::args().nth(3).as_deref() == Some("menu");
 
     let v = View {
-        running: true,
         enabled: true,
+        gate: true,
         recording: true,
+        running: true,
         gain_db: -1.5,
         // 线性峰值，画出来差不多 -12 dBFS
-        meters: [0.30, 0.26],
-        holds: [0.36, 0.31],
-        led: 0.62,
+        meters: [0.28, 0.24],
+        holds: [0.34, 0.29],
         zoom,
+        active: true,
         error: None,
     };
 
-    match render_png(std::path::Path::new(&out), &v) {
+    let ctl = Ctl::new();
+    ctl.set_enabled(true);
+    ctl.set_gate(true);
+    ctl.set_zoom(zoom);
+
+    let r = if with_menu {
+        render_png_with_menu(std::path::Path::new(&out), &v, &ctl, 300.0, 60.0)
+    } else {
+        render_png(std::path::Path::new(&out), &v)
+    };
+    match r {
         Some(()) => println!("wrote {out}"),
         None => {
             eprintln!("render failed");

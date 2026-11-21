@@ -37,6 +37,7 @@ pub struct Capture {
     rate: Arc<AtomicU32>,
     error: Arc<Mutex<String>>,
     apps: Arc<Mutex<Vec<String>>>,
+    started: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -49,6 +50,7 @@ impl Capture {
         let rate = Arc::new(AtomicU32::new(0));
         let error = Arc::new(Mutex::new(String::new()));
         let apps = Arc::new(Mutex::new(Vec::new()));
+        let started = Arc::new(AtomicBool::new(false));
 
         let th = {
             let ring = ring.clone();
@@ -71,16 +73,25 @@ impl Capture {
             rate,
             error,
             apps,
+            started,
             thread: th,
         }
     }
 
     pub fn start(&self) {
+        self.started.store(true, Ordering::Relaxed);
         let _ = self.tx.send(Cmd::Start);
     }
 
     pub fn stop(&self) {
+        self.started.store(false, Ordering::Relaxed);
         let _ = self.tx.send(Cmd::Stop);
+    }
+
+    /// 我们有没有发起过捕获（注意不是「流是否在跑」：
+    /// 没有应用在放声音时流不会进入 Streaming，用它判断会反复重启）
+    pub fn started(&self) -> bool {
+        self.started.load(Ordering::Relaxed)
     }
 
     pub fn ring(&self) -> Arc<Ring> {

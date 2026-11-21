@@ -224,7 +224,7 @@ impl Tap {
     /// 让 PipeWire 捕获跟着 enabled / 宿主处理状态走（主线程）
     fn sync_capture(&mut self) {
         let want = self.ctl.enabled() && self.processing;
-        if want != self.capture.is_running() {
+        if want != self.capture.started() {
             if want {
                 self.capture.start();
                 self.ring.reset();
@@ -387,7 +387,7 @@ unsafe extern "C" fn s_process(p: *const clap_plugin, proc: *const clap_process)
         s.recording = flags & CLAP_TRANSPORT_IS_RECORDING != 0;
     }
     s.ctl.set_recording(s.recording);
-    let gated = !s.ctl.enabled() || (s.transport_seen && !s.recording);
+    let gated = !s.ctl.enabled() || (s.ctl.gate() && s.transport_seen && !s.recording);
     if gated {
         // 不录音：只透传输入，不叠加实时捕获
         for i in 0..frames {
@@ -838,6 +838,10 @@ unsafe extern "C" fn st_load(p: *const clap_plugin, stream: *const clap_istream)
         } else if let Some(v) = line.strip_prefix("enabled=") {
             if let Ok(m) = v.trim().parse::<i32>() {
                 s.ctl.set_enabled(m != 0);
+            }
+        } else if let Some(v) = line.strip_prefix("gate=") {
+            if let Ok(m) = v.trim().parse::<i32>() {
+                s.ctl.set_gate(m != 0);
             }
         }
     }
