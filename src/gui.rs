@@ -72,6 +72,10 @@ fn menu_bg() -> Color {
 fn menu_hover() -> Color {
     Color::from_rgba8(0x20, 0x20, 0x24, 255)
 }
+/// 选中的行：整行铺一层暖色，不用小圆点
+fn menu_on() -> Color {
+    Color::from_rgba8(0x2c, 0x1f, 0x14, 255)
+}
 
 // ------------------------------------------------------------------ 字体
 struct Fonts {
@@ -955,19 +959,18 @@ fn paint(p: &mut Painter, v: &View, l: &mut Layout) {
                 y += SEP_H;
                 continue;
             }
-            if menu.hover == Some(i) {
+            if row.on {
+                p.rect(menu.x + 1.0, y, menu.w - 2.0, ROW_H, menu_on());
+            } else if menu.hover == Some(i) {
                 p.rect(menu.x + 1.0, y, menu.w - 2.0, ROW_H, menu_hover());
             }
-            if row.on {
-                p.circle(menu.x + 14.0, y + ROW_H / 2.0, 2.5, accent());
-            }
             p.text(
-                menu.x + 26.0,
+                menu.x + 12.0,
                 y + ROW_H / 2.0 + 4.0,
                 10.5,
                 0.2,
                 &row.label,
-                if row.on { ink() } else { muted() },
+                if row.on { accent() } else { muted() },
             );
             // 有子菜单的行在右边画一个小箭头
             if row.action == Some(Action::OpenZoom) {
@@ -988,19 +991,18 @@ fn paint(p: &mut Painter, v: &View, l: &mut Layout) {
             p.rect(sub.x + sub.w - 1.0, sub.y, 1.0, sh, line_hi());
             let mut sy = sub.y + 4.0;
             for (i, row) in sub.rows.iter().enumerate() {
-                if sub.hover == Some(i) {
+                if row.on {
+                    p.rect(sub.x + 1.0, sy, sub.w - 2.0, ROW_H, menu_on());
+                } else if sub.hover == Some(i) {
                     p.rect(sub.x + 1.0, sy, sub.w - 2.0, ROW_H, menu_hover());
                 }
-                if row.on {
-                    p.circle(sub.x + 14.0, sy + ROW_H / 2.0, 2.5, accent());
-                }
                 p.text(
-                    sub.x + 26.0,
+                    sub.x + 12.0,
                     sy + ROW_H / 2.0 + 4.0,
                     10.5,
                     0.2,
                     &row.label,
-                    if row.on { ink() } else { muted() },
+                    if row.on { accent() } else { muted() },
                 );
                 sy += ROW_H;
             }
