@@ -1,12 +1,9 @@
 //! 插件、GUI、音频线程之间唯一的共享状态。
 //!
-//! 音频线程只碰原子量；`Mutex` 只出现在设备列表、错误文本、缩放这些
-//! 与实时无关的地方。
+//! 音频线程只碰原子量；`Mutex` 只出现在错误文本这种与实时无关的地方。
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
-
-use crate::capture::SinkInfo;
 
 /// 界面缩放档位：50 / 100 / 150 / 200 / 250 / 300 %
 pub const ZOOMS: [f32; 6] = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0];
@@ -44,13 +41,11 @@ pub struct Ctl {
     capacity: AtomicU32,
     running: AtomicBool,
     gain_db: AtomicU32,
-    source: AtomicI32,
     sr: AtomicU32,
     dropped: AtomicU64,
     error: Mutex<String>,
     zoom: AtomicI32,
     zoom_dirty: AtomicBool,
-    sinks: Mutex<Vec<SinkInfo>>,
 }
 
 impl Ctl {
@@ -62,13 +57,11 @@ impl Ctl {
             capacity: AtomicU32::new(32768),
             running: AtomicBool::new(false),
             gain_db: AtomicU32::new(0f32.to_bits()),
-            source: AtomicI32::new(0),
             sr: AtomicU32::new(48000),
             dropped: AtomicU64::new(0),
             error: Mutex::new(String::new()),
             zoom: AtomicI32::new(1),
             zoom_dirty: AtomicBool::new(false),
-            sinks: Mutex::new(Vec::new()),
         }
     }
 
@@ -92,14 +85,6 @@ impl Ctl {
     }
     pub fn set_gain_db(&self, v: f32) {
         self.gain_db.store(f32_to_bits(v), Ordering::Relaxed);
-    }
-
-    // ---- 输入源（0 = 跟随系统默认输出）
-    pub fn source(&self) -> i32 {
-        self.source.load(Ordering::Relaxed)
-    }
-    pub fn set_source(&self, v: i32) {
-        self.source.store(v, Ordering::Relaxed);
     }
 
     // ---- 运行状态
@@ -161,25 +146,13 @@ impl Ctl {
             self.zoom_dirty.store(true, Ordering::Relaxed);
         }
     }
-    /// 宿主自己定了尺寸：同步档位但不要再回敬一次 resize，免得来回拉锯
+    /// 宿主自己定了尺寸：同步档位但不要再回敬一次 resize
     pub fn set_zoom_quiet(&self, idx: i32) {
         self.zoom
             .store(idx.clamp(0, ZOOMS.len() as i32 - 1), Ordering::Relaxed);
     }
     pub fn take_zoom_dirty(&self) -> bool {
         self.zoom_dirty.swap(false, Ordering::Relaxed)
-    }
-
-    // ---- 设备列表
-    pub fn sinks(&self) -> Vec<SinkInfo> {
-        self.sinks.lock().map(|v| v.clone()).unwrap_or_default()
-    }
-    pub fn set_sinks(&self, v: Vec<SinkInfo>) {
-        if let Ok(mut g) = self.sinks.lock() {
-            if *g != v {
-                *g = v;
-            }
-        }
     }
 }
 

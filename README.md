@@ -9,8 +9,11 @@ Linux / PipeWire 专用的 CLAP 插件。装上、点一下，轨道就开始长
 
 ## 只做一件事
 
-取音。插件不录音、不写文件、不做编辑——落盘、剪辑、混音全用宿主自带的。
-所以它没有：录音按钮的“保存到哪”、波形显示、导出。只有一个输入源、一个增益、两条电平。
+取音。插件不选设备、不录音、不写文件、不做编辑——落盘、剪辑、混音全用宿主自带的。
+
+**永远抓系统默认输出的 monitor**（`stream.capture.sink = true`），不需要虚拟声卡，
+不需要选输入源，没有 loopback 设备也照样能用。所以界面上没有设备列表、没有开关按钮：
+插上就抓，宿主要开始处理时它就在跑。
 
 ## 为什么需要它
 
@@ -22,7 +25,7 @@ TAP 把这件事搬进插件：它自己作为 PipeWire 客户端去抓任意 Si
 
 ## 用法（REAPER 为例）
 
-1. 在轨道上插入 **TAP**（插入即开始抓系统默认输出，想换设备点左边列表）
+1. 在轨道上插入 **TAP**（插上就开始抓系统默认输出）
 2. 轨道录音模式：右键录音按钮 / 右键轨道 → `Record: output (stereo)`，
    **再点一次选择子模式**：`post fader` / `post-fx pre-fader` / `pre fx`
    （想没了推子影响就选 `post-fx pre-fader`）
@@ -45,12 +48,13 @@ TAP 把这件事搬进插件：它自己作为 PipeWire 客户端去抓任意 Si
 
 ## 界面
 
-- **SOURCE**：`系统默认输出` + 每一个 PipeWire sink。点一行就切过去（正在抓的时候会无缝换）
-- **GAIN**：±24 dB，拖动旋钮，右键回 0
-- **OUTPUT**：两条电平 + 峰值保持，右边是 dB 刻度
-- **CAPTURE / STOP**：开关
+- **LED**：实体感的指示灯，亮度/光晕跟着音频走（LIVE / IDLE / ERROR）
+- **GAIN**：±24 dB 的旋钮，拖动调节；**双击回 0 dB**
+- **OUTPUT**：两条电平 + 峰值保持 + dB 刻度
 - **ZOOM**：`50 / 100 / 150 / 200 / 250 / 300 %`，尺寸按档位跳，不是自由拉伸
 - 底栏显示宿主速率、声卡速率（不一致会标 `RESAMPLED`）、缓冲毫秒和丢帧数
+- 界面按 **120 fps** 重绘（放大到 200%/300% 时自动降到 60/40 fps，省 CPU），
+  字形有缓存，走 MIT-SHM 上屏
 
 ## 安装
 
@@ -78,7 +82,9 @@ PipeWire 线程 ──pw_stream(sink monitor)──▶ 无锁环形缓冲 ──
                                             （和 DAW 时钟的漂移补偿）
 ```
 
-- 抓 monitor 用 `stream.capture.sink = true`；指定设备用 `target.object = <sink 的 node.name>`
+- 抓 monitor 用 `stream.capture.sink = true`（跟随系统默认输出）
+- `process()` 成功必须返回 `CLAP_PROCESS_CONTINUE`(1)。返回 0 是 `CLAP_PROCESS_ERROR`，
+  宿主会把这一块的输出 buffer **整个人丢掉**——这也是「插件有电平、轨道没声音」的原因之一
 - 输出 buffer 的 `constant_mask` 必须自己清零。宿主从不清理这个字段，而它代表
   「这个 block 里每个声道都是第 0 个样本的恒定值，你可以只读一个样本」。
   REAPER 的静音优化会把输出 buffer 预标成恒定/静音；插件不清它，宿主就把我们
@@ -90,6 +96,7 @@ PipeWire 线程 ──pw_stream(sink monitor)──▶ 无锁环形缓冲 ──
 ## 已知限制
 
 - 只支持 X11 窗口（Wayland 原生窗口没做，REAPER 本身走 XWayland 所以没问题）
+- 只抓系统默认输出。想单独抓某个程序，就把它指到默认输出设备
 - 只发 CLAP，不打算做 VST3 / LV2 —— `Cargo.toml` 里的 `rlib` 只是给 examples / 测试用，不是插件格式
 - 只在 REAPER + PipeWire 1.6 / Hyprland 上验证过，其他 CLAP 宿主理论上也能用
 - 没有 Windows / macOS 支持（这两边本来就不需要它）

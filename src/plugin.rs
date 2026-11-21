@@ -21,7 +21,7 @@ use clap_sys::factory::plugin_factory::clap_plugin_factory;
 use clap_sys::host::clap_host;
 use clap_sys::id::CLAP_INVALID_ID;
 use clap_sys::plugin::*;
-use clap_sys::process::clap_process;
+use clap_sys::process::{clap_process, CLAP_PROCESS_CONTINUE};
 use clap_sys::stream::{clap_istream, clap_ostream};
 use clap_sys::string_sizes::{CLAP_NAME_SIZE, CLAP_PATH_SIZE};
 use clap_sys::version::CLAP_VERSION;
@@ -45,15 +45,14 @@ macro_rules! dbg_log {
 }
 
 /// 调试用：TAP_DEBUG_TONE=1 时输出 440 Hz 正弦，忽略 PipeWire 抓音。
-/// 用途：在宿主里验证“插件的输出到底有没有被采纳”（排除抓音链路的干扰）。
+/// 用途：在宿主里验证「插件的输出到底有没有被采纳」（排除抓音链路的干扰）。
 fn debug_tone_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("TAP_DEBUG_TONE").is_some())
 }
 
 const PARAM_GAIN: u32 = 1;
-const PARAM_SOURCE: u32 = 2;
-const PARAM_ZOOM: u32 = 3;
+const PARAM_ZOOM: u32 = 2;
 
 /// 缓冲目标：60 ms。既是延迟补偿值，也是漂移补偿的平衡点。
 const FILL_SECS: f64 = 0.060;
@@ -78,7 +77,7 @@ static DESC: clap_plugin_descriptor = clap_plugin_descriptor {
     manual_url: b"https://github.com/77-223255/neilu#readme\0".as_ptr() as *const c_char,
     support_url: b"https://github.com/77-223255/neilu/issues\0".as_ptr() as *const c_char,
     version: concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const c_char,
-    description: b"System audio (PipeWire sink monitor) straight into your DAW track\0".as_ptr()
+    description: b"System audio (default sink monitor) straight into your DAW track\0".as_ptr()
         as *const c_char,
     features: FEATURES.0.as_ptr(),
 };
@@ -110,7 +109,6 @@ pub struct Tap {
     tone_phase: f64,
     hold: [f32; 2],
     hold_age: [u32; 2],
-    autostarted: bool,
 }
 
 impl Tap {
@@ -181,7 +179,6 @@ impl Tap {
             tone_phase: 0.0,
             hold: [0.0; 2],
             hold_age: [0; 2],
-            autostarted: false,
         });
 
         let ptr = &mut *boxed as *mut Self as *mut c_void;
@@ -213,43 +210,9 @@ impl Tap {
         }
     }
 
-    /// 按当前参数开始抓音（0 = 跟随系统默认输出）
-    fn start_selected(&self) {
-        let idx = self.ctl.source().max(0);
-        let sink = if idx == 0 {
-            None
-        } else {
-            self.capture
-                .sinks()
-                .get((idx - 1) as usize)
-                .map(|s| s.name.clone())
-        };
-        self.capture.start(sink.as_deref());
-    }
-
-    /// 主线程上的杂活：状态回填、缩放落地、首次自动开抓。
+    /// 主线程上的杂活：状态回填 + 缩放落地。
     fn tick(&mut self) {
-        if !self.autostarted {
-            self.autostarted = true;
-            self.start_selected();
-            dbg_log!("autostart requested");
-        } else if self.capture.is_running() {
-            // 参数自动化改了输入源：在这里落地，音频线程不碰设备列表
-            let idx = self.ctl.source().max(0);
-            let sinks = self.capture.sinks();
-            let want = if idx == 0 {
-                Some(None)
-            } else {
-                sinks.get((idx - 1) as usize).map(|x| Some(x.name.clone()))
-            };
-            if let Some(want) = want {
-                if self.capture.target() != want {
-                    self.capture.start(want.as_deref());
-                }
-            }
-        }
         self.ctl.set_running(self.capture.is_running());
-        self.ctl.set_sinks(self.capture.sinks());
         self.ctl.set_error(self.capture.error());
         self.ctl.set_sr(self.sr as u32);
         if self.ctl.take_zoom_dirty() {
@@ -267,7 +230,7 @@ unsafe fn me<'a>(p: *const clap_plugin) -> &'a mut Tap {
 
 unsafe extern "C" fn s_init(p: *const clap_plugin) -> bool {
     let s = me(p);
-    dbg_log!("init (host_gui={})", !s.host.is_null());
+    dbg_log!("init");
     if s.host.is_null() {
         return true;
     }
@@ -298,20 +261,25 @@ unsafe extern "C" fn s_activate(p: *const clap_plugin, sr: f64, _min: u32, _max:
 }
 
 unsafe extern "C" fn s_deactivate(p: *const clap_plugin) {
+    dbg_log!("deactivate");
     me(p).capture.stop();
 }
 
 unsafe extern "C" fn s_start_processing(p: *const clap_plugin) -> bool {
     let s = me(p);
     dbg_log!("start_processing");
-    s.tick();
-    // 宿主可能刚从「没在处理」恢复：扔掉积压，从当前的 60ms 重新开始
+    // 宿主要开始处理了：开抓默认输出，把积压清掉
+    s.capture.start();
     s.ring.reset();
     s.phase = 1.0;
+    s.tick();
     true
 }
 
-unsafe extern "C" fn s_stop_processing(_p: *const clap_plugin) {}
+unsafe extern "C" fn s_stop_processing(p: *const clap_plugin) {
+    dbg_log!("stop_processing");
+    me(p).capture.stop();
+}
 
 unsafe extern "C" fn s_reset(p: *const clap_plugin) {
     let s = me(p);
@@ -326,30 +294,33 @@ unsafe extern "C" fn s_on_main_thread(p: *const clap_plugin) {
 // ---------------------------------------------------------------- 处理
 
 unsafe extern "C" fn s_process(p: *const clap_plugin, proc: *const clap_process) -> i32 {
+    // 注意：返回 0 是 CLAP_PROCESS_ERROR —— 宿主会把输出 buffer 丢掉。
+    // 成功必须返回 CLAP_PROCESS_CONTINUE(1)，这是之前「轨道没声音」的元凶之一。
     if proc.is_null() {
-        return 0;
+        return CLAP_PROCESS_CONTINUE;
     }
     let s = me(p);
     let pr = &*proc;
 
     read_events(s, pr.in_events);
 
-    if pr.audio_outputs_count == 0 || pr.frames_count == 0 {
-        return 0;
+    if pr.audio_outputs_count == 0 || pr.frames_count == 0 || pr.audio_outputs.is_null() {
+        return CLAP_PROCESS_CONTINUE;
     }
+
     // 输出 buffer 必须用可变引用：宿主从不清 constant_mask，
     // 而我们写的是逐样本变化的数据，必须自己把它打成 0。
     // 不清的后果：宿主以为每个 block 是恒定值，只读第 0 个样本铺满整块，
-    // 我们捕获到的音频就被“采样保持”成噪声（REAPER 的静音优化就会这样）。
+    // 我们捕获到的音频就被「采样保持」成噪声。
     let ob: &mut clap_audio_buffer = &mut *(pr.audio_outputs as *mut clap_audio_buffer);
     ob.constant_mask = 0;
     ob.latency = 0;
     if ob.channel_count == 0 || ob.data32.is_null() {
-        return 0;
+        return CLAP_PROCESS_CONTINUE;
     }
     let out_l = *ob.data32;
     if out_l.is_null() {
-        return 0;
+        return CLAP_PROCESS_CONTINUE;
     }
     let out_r = if ob.channel_count > 1 {
         *ob.data32.add(1)
@@ -358,32 +329,13 @@ unsafe extern "C" fn s_process(p: *const clap_plugin, proc: *const clap_process)
     };
 
     let frames = pr.frames_count as usize;
-    {
-        static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
-        if ONCE.swap(false, std::sync::atomic::Ordering::Relaxed) {
-            let in_l = if pr.audio_inputs_count > 0 && !pr.audio_inputs.is_null() {
-                let ib = &*pr.audio_inputs;
-                if ib.data32.is_null() { 0 } else { *ib.data32 as usize }
-            } else { 0 };
-            dbg_log!(
-                "process first call: frames={frames} out_ports={} out_ch={} in_ports={} in_ch={} out0={:p} out1={:p} in0={:x} out_arrays={:p}",
-                pr.audio_outputs_count,
-                ob.channel_count,
-                pr.audio_inputs_count,
-                if pr.audio_inputs_count > 0 && !pr.audio_inputs.is_null() { (&*pr.audio_inputs).channel_count } else { 0 },
-                out_l,
-                if ob.channel_count > 1 { *ob.data32.add(1) } else { std::ptr::null_mut() },
-                in_l,
-                pr.audio_outputs
-            );
-        }
-    }
+    let host_sr = if s.sr > 0.0 { s.sr } else { 48000.0 };
+
     if debug_tone_enabled() {
         // 调试音：只用来验证宿主有没有采纳我们的输出
-        let sr = if s.sr > 0.0 { s.sr } else { 48000.0 };
         for i in 0..frames {
             let v = (0.4 * (std::f64::consts::TAU * 440.0 * s.tone_phase).sin()) as f32;
-            s.tone_phase += 1.0 / sr;
+            s.tone_phase += 1.0 / host_sr;
             *out_l.add(i) = v;
             if out_r != out_l {
                 *out_r.add(i) = v;
@@ -391,11 +343,10 @@ unsafe extern "C" fn s_process(p: *const clap_plugin, proc: *const clap_process)
         }
         s.tone_phase = s.tone_phase.fract();
         ob.constant_mask = 0;
-        return 0;
+        return CLAP_PROCESS_CONTINUE;
     }
 
     let gain = 10f32.powf(s.ctl.gain_db() / 20.0);
-    let host_sr = if s.sr > 0.0 { s.sr } else { 48000.0 };
     let card_sr = s.capture.rate();
 
     // 声卡速率 / 宿主速率 = 每输出一帧要凑多少输入帧
@@ -442,8 +393,8 @@ unsafe extern "C" fn s_process(p: *const clap_plugin, proc: *const clap_process)
         peak[0] = peak[0].max(l.abs());
         peak[1] = peak[1].max(r.abs());
 
-        *out_l.add(i) = l;
         if out_r != out_l {
+            *out_l.add(i) = l;
             *out_r.add(i) = r;
         } else {
             *out_l.add(i) = 0.5 * (l + r);
@@ -456,11 +407,11 @@ unsafe extern "C" fn s_process(p: *const clap_plugin, proc: *const clap_process)
 
     // 电平表 + 峰值保持
     for ch in 0..2 {
-        let prev_level = s.ctl.meter(ch);
-        let shown = if peak[ch] > prev_level {
+        let previous = s.ctl.meter(ch);
+        let shown = if peak[ch] > previous {
             peak[ch]
         } else {
-            prev_level * 0.86
+            previous * 0.86
         };
         s.ctl.set_meter(ch, shown);
         if shown >= s.hold[ch] {
@@ -475,28 +426,10 @@ unsafe extern "C" fn s_process(p: *const clap_plugin, proc: *const clap_process)
         s.ctl.set_hold(ch, s.hold[ch]);
     }
 
-    {
-        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        static T0: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
-        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if n % 32 == 0 {
-            let mut g = T0.lock().unwrap();
-            let t0 = *g.get_or_insert_with(std::time::Instant::now);
-            dbg_log!(
-                "process #{n} t={}ms avail={} steps={} cap_rate={} running={} peak={:.3}",
-                t0.elapsed().as_millis(),
-                s.ring.available(),
-                n as f64 * 1024.0 / 48.0,
-                s.capture.rate(),
-                s.capture.is_running(),
-                peak[0].max(peak[1])
-            );
-        }
-    }
     s.ctl.set_fill(s.ring.available() as u32);
     s.ctl.set_dropped(s.capture.dropped_frames());
     ob.constant_mask = 0;
-    0
+    CLAP_PROCESS_CONTINUE
 }
 
 unsafe fn read_events(s: &mut Tap, events: *const clap_input_events) {
@@ -520,13 +453,6 @@ unsafe fn read_events(s: &mut Tap, events: *const clap_input_events) {
 fn apply_param(s: &mut Tap, id: u32, value: f64) {
     match id {
         PARAM_GAIN => s.ctl.set_gain_db(value as f32),
-        PARAM_SOURCE => {
-            let idx = value.max(0.0) as i32;
-            if idx != s.ctl.source() {
-                s.ctl.set_source(idx);
-                s.request_callback();
-            }
-        }
         PARAM_ZOOM => {
             let idx = value.max(0.0).round() as i32;
             if idx != s.ctl.zoom() {
@@ -592,7 +518,7 @@ fn write_name(dst: &mut [c_char; CLAP_NAME_SIZE], s: &str) {
 // ---- params
 
 unsafe extern "C" fn pa_count(_p: *const clap_plugin) -> u32 {
-    3
+    2
 }
 
 unsafe extern "C" fn pa_get_info(
@@ -617,15 +543,6 @@ unsafe extern "C" fn pa_get_info(
             true
         }
         1 => {
-            i.id = PARAM_SOURCE;
-            write_name(&mut i.name, "Source");
-            i.flags = CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_ENUM;
-            i.min_value = 0.0;
-            i.max_value = 32.0;
-            i.default_value = 0.0;
-            true
-        }
-        2 => {
             i.id = PARAM_ZOOM;
             write_name(&mut i.name, "UI Zoom");
             i.flags = CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_ENUM;
@@ -645,7 +562,6 @@ unsafe extern "C" fn pa_get_value(p: *const clap_plugin, id: u32, out: *mut f64)
     let s = me(p);
     match id {
         PARAM_GAIN => *out = s.ctl.gain_db() as f64,
-        PARAM_SOURCE => *out = s.ctl.source() as f64,
         PARAM_ZOOM => *out = s.ctl.zoom() as f64,
         _ => return false,
     }
@@ -653,27 +569,14 @@ unsafe extern "C" fn pa_get_value(p: *const clap_plugin, id: u32, out: *mut f64)
 }
 
 unsafe extern "C" fn pa_value_to_text(
-    p: *const clap_plugin,
+    _p: *const clap_plugin,
     id: u32,
     value: f64,
     out: *mut c_char,
     size: u32,
 ) -> bool {
-    let s = me(p);
     let text = match id {
         PARAM_GAIN => format!("{value:+.1} dB"),
-        PARAM_SOURCE => {
-            let idx = value.max(0.0) as usize;
-            if idx == 0 {
-                "System default".to_string()
-            } else {
-                s.capture
-                    .sinks()
-                    .get(idx - 1)
-                    .map(|x| x.label.clone())
-                    .unwrap_or_else(|| "-".to_string())
-            }
-        }
         PARAM_ZOOM => {
             let idx = value.max(0.0).round() as usize;
             let z = ZOOMS.get(idx).copied().unwrap_or(1.0);
@@ -686,7 +589,7 @@ unsafe extern "C" fn pa_value_to_text(
 }
 
 unsafe extern "C" fn pa_text_to_value(
-    p: *const clap_plugin,
+    _p: *const clap_plugin,
     id: u32,
     text: *const c_char,
     out: *mut f64,
@@ -706,25 +609,11 @@ unsafe extern "C" fn pa_text_to_value(
                 Err(_) => false,
             }
         }
-        PARAM_SOURCE => {
-            if txt.trim() == "System default" {
-                *out = 0.0;
-                return true;
-            }
-            match me(p).capture.sinks().iter().position(|x| x.label == txt) {
-                Some(i) => {
-                    *out = (i + 1) as f64;
-                    true
-                }
-                None => false,
-            }
-        }
         PARAM_ZOOM => {
             let cleaned = txt.trim_end_matches('%').trim();
             match cleaned.parse::<f64>() {
                 Ok(v) => {
-                    let idx = zoom_index((v / 100.0) as f32);
-                    *out = idx as f64;
+                    *out = zoom_index((v / 100.0) as f32) as f64;
                     true
                 }
                 Err(_) => false,
@@ -761,21 +650,7 @@ unsafe extern "C" fn st_save(p: *const clap_plugin, stream: *const clap_ostream)
         return false;
     }
     let s = me(p);
-    let sink = if s.ctl.source() <= 0 {
-        "auto".to_string()
-    } else {
-        s.capture
-            .sinks()
-            .get((s.ctl.source() - 1) as usize)
-            .map(|x| x.name.clone())
-            .unwrap_or_else(|| "auto".to_string())
-    };
-    let text = format!(
-        "sink={}\ngain_db={}\nzoom={}\n",
-        sink,
-        s.ctl.gain_db(),
-        s.ctl.zoom()
-    );
+    let text = format!("gain_db={}\nzoom={}\n", s.ctl.gain_db(), s.ctl.zoom());
     write_stream(stream, text.as_bytes())
 }
 
@@ -784,10 +659,10 @@ unsafe extern "C" fn st_load(p: *const clap_plugin, stream: *const clap_istream)
         return false;
     }
     let s = me(p);
-    let mut buf = [0u8; 1024];
+    let mut buf = [0u8; 512];
     let mut len = 0usize;
     while len < buf.len() {
-        let mut chunk = [0u8; 256];
+        let mut chunk = [0u8; 128];
         let n = read_stream(stream, &mut chunk);
         if n <= 0 {
             break;
@@ -798,14 +673,7 @@ unsafe extern "C" fn st_load(p: *const clap_plugin, stream: *const clap_istream)
     }
     let text = String::from_utf8_lossy(&buf[..len]).to_string();
     for line in text.lines() {
-        if let Some(v) = line.strip_prefix("sink=") {
-            let v = v.trim().to_string();
-            if v == "auto" || v.is_empty() {
-                s.ctl.set_source(0);
-            } else if let Some(i) = s.capture.sinks().iter().position(|x| x.name == v) {
-                s.ctl.set_source((i + 1) as i32);
-            }
-        } else if let Some(v) = line.strip_prefix("gain_db=") {
+        if let Some(v) = line.strip_prefix("gain_db=") {
             if let Ok(g) = v.trim().parse::<f32>() {
                 s.ctl.set_gain_db(g);
             }
@@ -879,7 +747,6 @@ unsafe extern "C" fn gu_get_preferred_api(
 }
 
 unsafe extern "C" fn gu_create(p: *const clap_plugin, api: *const c_char, is_floating: bool) -> bool {
-    dbg_log!("gui_create floating={is_floating}");
     if is_floating || !api_matches(api, b"x11") {
         return false;
     }
@@ -1060,9 +927,3 @@ pub static clap_entry: clap_plugin_entry = clap_plugin_entry {
     deinit: Some(entry_deinit),
     get_factory: Some(entry_get_factory),
 };
-
-// 让 clap_audio_buffer 的导入不被裁剪，顺便避免 unused 警告
-#[allow(dead_code)]
-fn _touch(b: *const clap_audio_buffer) -> u32 {
-    unsafe { (*b).channel_count }
-}
