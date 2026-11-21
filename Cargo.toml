@@ -6,7 +6,7 @@ description = "PipeWire system audio capture as a CLAP plugin (内录)"
 license = "GPL-3.0-or-later"
 
 [lib]
-# cdylib = CLAP 插件本体；rlib 只给 examples/tests 用，不是可安装的插件格式
+# cdylib = CLAP 插件本体；rlib 只给 examples 用，不是可安装的插件格式
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
