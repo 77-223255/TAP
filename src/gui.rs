@@ -839,30 +839,16 @@ fn paint(p: &mut Painter, v: &View, l: &mut Layout) {
     let t = ((v.gain_db + KNOB_RANGE) / (KNOB_RANGE * 2.0)).clamp(0.0, 1.0);
     let ang = A0 + (A1 - A0) * t;
 
-    // 中间：dB 读数
-    let val = if v.gain_db.abs() < 0.05 {
-        "0.0".to_string()
-    } else {
-        format!("{:+.1}", v.gain_db)
-    };
-    let vw = p.text_w_of(&val, 34.0, 0.6);
-    p.text(
-        cx - vw / 2.0,
-        cy + 9.0,
-        34.0,
-        0.6,
-        &val,
-        if v.active { ink() } else { muted() },
+    // 指针（老样子）
+    p.line(
+        cx + ang.sin() * kr * 0.18,
+        cy - ang.cos() * kr * 0.18,
+        cx + ang.sin() * kr * 0.82,
+        cy - ang.cos() * kr * 0.82,
+        ink(),
+        2.0,
     );
-    let uw = p.text_w_of("dB", 10.0, 1.2);
-    p.text(
-        cx - uw / 2.0,
-        cy + 31.0,
-        10.0,
-        1.2,
-        "dB",
-        if v.active { muted() } else { line_hi() },
-    );
+    p.circle(cx, cy, 2.0, ink());
 
     // 增益位置：电平圈外侧的一小段刻度
     p.line(
