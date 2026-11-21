@@ -34,7 +34,7 @@ const GAIN_MARK: f32 = KNOB_R + 25.0;
 /// 行程角：±135°
 const A0: f32 = -2.356;
 const A1: f32 = 2.356;
-const ROW_H: f32 = 20.0;
+const ROW_H: f32 = 22.0;
 const SEP_H: f32 = 9.0;
 
 pub fn size_for(scale: f32) -> (u32, u32) {
@@ -67,10 +67,10 @@ fn green() -> Color {
     Color::from_rgba8(0x5c, 0xc9, 0x4a, 255)
 }
 fn menu_bg() -> Color {
-    Color::from_rgba8(0x12, 0x12, 0x14, 255)
+    Color::from_rgba8(0x16, 0x16, 0x1a, 255)
 }
 fn menu_hover() -> Color {
-    Color::from_rgba8(0x1e, 0x1e, 0x21, 255)
+    Color::from_rgba8(0x20, 0x20, 0x24, 255)
 }
 
 // ------------------------------------------------------------------ 字体
@@ -259,14 +259,6 @@ impl Painter {
         }
     }
 
-    fn text_w_of(&self, s: &str, size: f32, spacing: f32) -> f32 {
-        let px = size * self.s;
-        let mut w = 0.0;
-        for ch in s.chars() {
-            w += self.fonts.regular.metrics(ch, px).advance_width + spacing * self.s;
-        }
-        w / self.s
-    }
 }
 
 // ------------------------------------------------------------------ 视图数据
@@ -522,7 +514,7 @@ impl Drop for Shm {
     }
 }
 
-fn build_menu(ctl: &Ctl, p: &Painter, x: f32, y: f32) -> Menu {
+fn build_menu(ctl: &Ctl, _p: &Painter, x: f32, y: f32) -> Menu {
     let rows = vec![
         Row {
             label: "Capture".into(),
@@ -530,19 +522,12 @@ fn build_menu(ctl: &Ctl, p: &Painter, x: f32, y: f32) -> Menu {
             on: ctl.enabled(),
         },
         Row {
-            label: format!(
-                "Zoom   {:.0}%",
-                crate::ctl::zoom_scale(ctl.zoom()) * 100.0
-            ),
+            label: "Zoom".into(),
             action: Some(Action::OpenZoom),
             on: false,
         },
     ];
-    let mut w = 0.0f32;
-    for r in &rows {
-        w = w.max(p.text_w_of(&r.label, 10.5, 0.2));
-    }
-    let w = w + 40.0;
+    let w = 128.0;
     let mut menu = Menu {
         x,
         y,
