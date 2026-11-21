@@ -9,8 +9,8 @@ use std::sync::Arc;
 use clap_sys::audio_buffer::clap_audio_buffer;
 use clap_sys::entry::clap_plugin_entry;
 use clap_sys::events::{
-    clap_event_header, clap_event_param_value, clap_input_events, clap_output_events,
-    CLAP_EVENT_PARAM_VALUE,
+    clap_event_header, clap_event_param_value, clap_event_transport, clap_input_events,
+    clap_output_events, CLAP_EVENT_PARAM_VALUE, CLAP_EVENT_TRANSPORT, CLAP_TRANSPORT_IS_RECORDING,
 };
 use clap_sys::ext::audio_ports::*;
 use clap_sys::ext::gui::*;
@@ -53,6 +53,7 @@ fn debug_tone_enabled() -> bool {
 
 const PARAM_GAIN: u32 = 1;
 const PARAM_ZOOM: u32 = 2;
+const PARAM_MODE: u32 = 3;
 
 /// 缓冲目标：60 ms。既是延迟补偿值，也是漂移补偿的平衡点。
 const FILL_SECS: f64 = 0.060;
@@ -109,6 +110,10 @@ pub struct Tap {
     tone_phase: f64,
     hold: [f32; 2],
     hold_age: [u32; 2],
+    /// 宿主有没有给过走带信息（没给过就别 gate，不然插件永远静音）
+    transport_seen: bool,
+    recording: bool,
+    gated: bool,
 }
 
 impl Tap {
@@ -179,6 +184,9 @@ impl Tap {
             tone_phase: 0.0,
             hold: [0.0; 2],
             hold_age: [0; 2],
+            transport_seen: false,
+            recording: false,
+            gated: false,
         });
 
         let ptr = &mut *boxed as *mut Self as *mut c_void;
@@ -331,6 +339,39 @@ unsafe extern "C" fn s_process(p: *const clap_plugin, proc: *const clap_process)
     let frames = pr.frames_count as usize;
     let host_sr = if s.sr > 0.0 { s.sr } else { 48000.0 };
 
+    // ── 只在录音时输出 ──
+    // 录完之后重放工程时，如果插件还在往外吐实时声音，就会和录好的片段叠在一起，
+    // 听起来像「宿主又放了一遍」。所以默认只在 transport 处于录音状态时输出。
+    if let Some(flags) = transport_flags(pr) {
+        s.transport_seen = true;
+        s.recording = flags & CLAP_TRANSPORT_IS_RECORDING != 0;
+    }
+    s.ctl.set_recording(s.recording);
+    let gated = s.ctl.mode() == 0 && s.transport_seen && !s.recording;
+    if gated {
+        for i in 0..frames {
+            *out_l.add(i) = 0.0;
+            if out_r != out_l {
+                *out_r.add(i) = 0.0;
+            }
+        }
+        // 环形缓冲不动它，电平自然回落
+        for ch in 0..2 {
+            s.ctl.set_meter(ch, s.ctl.meter(ch) * 0.86);
+            s.ctl.set_hold(ch, s.ctl.hold(ch) * 0.90);
+        }
+        s.gated = true;
+        ob.constant_mask = 0;
+        return CLAP_PROCESS_CONTINUE;
+    }
+    if s.gated {
+        // 刚开始录：丢掉空档期间攒下的旧音频
+        s.gated = false;
+        s.phase = 1.0;
+        s.prev = Frame::default();
+        s.cur = Frame::default();
+    }
+
     if debug_tone_enabled() {
         // 调试音：只用来验证宿主有没有采纳我们的输出
         for i in 0..frames {
@@ -355,8 +396,10 @@ unsafe extern "C" fn s_process(p: *const clap_plugin, proc: *const clap_process)
     } else {
         1.0
     };
-    // 时钟漂移补偿：按缓冲填充量微调播放速率，避免长期累积成爆音
-    let target = host_sr * FILL_SECS;
+    // 时钟漂移补偿：按缓冲填充量微调播放速率，避免长期累积成爆音。
+    // 目标至少两块多，块越小延迟越低（回授之外的“二次声”也越不明显）。
+    let target = (frames as f64 * 2.0 + host_sr * 0.008)
+        .clamp(host_sr * 0.020, host_sr * 0.100);
     let ring: *const Ring = &*s.ring;
     let mut avail = (*ring).available() as f64;
     if avail > target * 4.0 {
@@ -450,6 +493,29 @@ unsafe fn read_events(s: &mut Tap, events: *const clap_input_events) {
     }
 }
 
+/// 读走带 flags：优先 process.transport，其次输入事件里的 transport 事件
+unsafe fn transport_flags(pr: &clap_process) -> Option<u32> {
+    if !pr.transport.is_null() {
+        return Some((*pr.transport).flags);
+    }
+    let ev = pr.in_events;
+    if ev.is_null() {
+        return None;
+    }
+    let ev = &*ev;
+    let (Some(size), Some(get)) = (ev.size, ev.get) else {
+        return None;
+    };
+    for i in 0..size(ev) {
+        let h = get(ev, i);
+        if h.is_null() || (*h).type_ != CLAP_EVENT_TRANSPORT {
+            continue;
+        }
+        return Some((*(h as *const clap_event_transport)).flags);
+    }
+    None
+}
+
 fn apply_param(s: &mut Tap, id: u32, value: f64) {
     match id {
         PARAM_GAIN => s.ctl.set_gain_db(value as f32),
@@ -460,6 +526,7 @@ fn apply_param(s: &mut Tap, id: u32, value: f64) {
                 s.request_callback();
             }
         }
+        PARAM_MODE => s.ctl.set_mode(value.max(0.0).round() as i32),
         _ => {}
     }
 }
@@ -518,7 +585,7 @@ fn write_name(dst: &mut [c_char; CLAP_NAME_SIZE], s: &str) {
 // ---- params
 
 unsafe extern "C" fn pa_count(_p: *const clap_plugin) -> u32 {
-    2
+    3
 }
 
 unsafe extern "C" fn pa_get_info(
@@ -551,6 +618,15 @@ unsafe extern "C" fn pa_get_info(
             i.default_value = 1.0;
             true
         }
+        2 => {
+            i.id = PARAM_MODE;
+            write_name(&mut i.name, "Output");
+            i.flags = CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_ENUM;
+            i.min_value = 0.0;
+            i.max_value = 1.0;
+            i.default_value = 0.0;
+            true
+        }
         _ => false,
     }
 }
@@ -563,6 +639,7 @@ unsafe extern "C" fn pa_get_value(p: *const clap_plugin, id: u32, out: *mut f64)
     match id {
         PARAM_GAIN => *out = s.ctl.gain_db() as f64,
         PARAM_ZOOM => *out = s.ctl.zoom() as f64,
+        PARAM_MODE => *out = s.ctl.mode() as f64,
         _ => return false,
     }
     true
@@ -581,6 +658,13 @@ unsafe extern "C" fn pa_value_to_text(
             let idx = value.max(0.0).round() as usize;
             let z = ZOOMS.get(idx).copied().unwrap_or(1.0);
             format!("{:.0} %", z * 100.0)
+        }
+        PARAM_MODE => {
+            if value.max(0.0).round() as i32 == 0 {
+                "Rec only".to_string()
+            } else {
+                "Always".to_string()
+            }
         }
         _ => return false,
     };
@@ -619,6 +703,18 @@ unsafe extern "C" fn pa_text_to_value(
                 Err(_) => false,
             }
         }
+        PARAM_MODE => {
+            let t = txt.trim().to_ascii_lowercase();
+            if t.starts_with("rec") {
+                *out = 0.0;
+                true
+            } else if t.starts_with("always") || t.starts_with("live") {
+                *out = 1.0;
+                true
+            } else {
+                false
+            }
+        }
         _ => false,
     }
 }
@@ -650,7 +746,12 @@ unsafe extern "C" fn st_save(p: *const clap_plugin, stream: *const clap_ostream)
         return false;
     }
     let s = me(p);
-    let text = format!("gain_db={}\nzoom={}\n", s.ctl.gain_db(), s.ctl.zoom());
+    let text = format!(
+        "gain_db={}\nzoom={}\nmode={}\n",
+        s.ctl.gain_db(),
+        s.ctl.zoom(),
+        s.ctl.mode()
+    );
     write_stream(stream, text.as_bytes())
 }
 
@@ -681,6 +782,10 @@ unsafe extern "C" fn st_load(p: *const clap_plugin, stream: *const clap_istream)
             if let Ok(z) = v.trim().parse::<i32>() {
                 s.ctl.set_zoom(z);
                 s.request_callback();
+            }
+        } else if let Some(v) = line.strip_prefix("mode=") {
+            if let Ok(m) = v.trim().parse::<i32>() {
+                s.ctl.set_mode(m);
             }
         }
     }

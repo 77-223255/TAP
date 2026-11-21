@@ -30,6 +30,8 @@ fn main() {
         error: None,
         dropped: 0,
         apps: vec!["Chromium".to_string(), "Spotify".to_string()],
+        recording: true,
+        mode: 0,
     };
 
     match render_png(std::path::Path::new(&out), &v) {

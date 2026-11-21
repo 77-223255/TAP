@@ -476,6 +476,10 @@ pub struct View {
     pub dropped: u64,
     /// 正在被捕获的应用名
     pub apps: Vec<String>,
+    /// 宿主是否在录音
+    pub recording: bool,
+    /// 0 = 只在录音时输出，1 = 一直输出
+    pub mode: i32,
 }
 
 impl View {
@@ -494,6 +498,8 @@ impl View {
             error: if err.is_empty() { None } else { Some(err) },
             dropped: cap.dropped_frames(),
             apps: cap.apps(),
+            recording: ctl.recording(),
+            mode: ctl.mode(),
         }
     }
 }
@@ -502,6 +508,7 @@ impl View {
 pub struct Layout {
     knob: (f32, f32, f32),
     zoom_btns: Vec<(f32, f32, f32, f32, usize)>,
+    mode_btn: (f32, f32, f32, f32),
     drag: Option<(f32, f32)>,
     last_press: Option<(Instant, f32, f32)>,
 }
@@ -511,6 +518,7 @@ impl Default for Layout {
         Self {
             knob: (0.0, 0.0, 0.0),
             zoom_btns: Vec::new(),
+            mode_btn: (0.0, 0.0, 0.0, 0.0),
             drag: None,
             last_press: None,
         }
@@ -758,7 +766,9 @@ fn run_ui(ctl: Arc<Ctl>, cap: Arc<Capture>, quit: Arc<AtomicBool>, host: usize, 
                         continue;
                     }
                     let (x, y) = (b.event_x as f32 / scale, b.event_y as f32 / scale);
-                    if knob_hit(&layout, x, y) {
+                    if inside(layout.mode_btn, x, y) {
+                        ctl.set_mode(if ctl.mode() == 0 { 1 } else { 0 });
+                    } else if knob_hit(&layout, x, y) {
                         // 双击回 0 dB
                         let now = Instant::now();
                         let dbl = matches!(layout.last_press, Some((t, px, py))
@@ -955,8 +965,14 @@ fn paint(p: &mut Painter, v: &View, l: &mut Layout) {
     p.text(PAD, 52.0, 8.0, 1.9, "SYSTEM AUDIO → TRACK", dim2());
 
     // 状态：实体 LED + 文字
+    let rec_only = v.mode == 0;
+    let active = if rec_only { v.recording } else { v.running };
     let (status, status_col) = if v.error.is_some() {
         ("ERROR", amber())
+    } else if rec_only && v.recording {
+        ("REC", accent())
+    } else if rec_only {
+        ("ARMED", dim2())
     } else if v.running {
         ("LIVE", accent())
     } else {
@@ -965,7 +981,55 @@ fn paint(p: &mut Painter, v: &View, l: &mut Layout) {
     p.text_right(BASE_W - PAD, 26.0, 9.0, 1.6, status, status_col);
     let sw = p.text_w_of(status, 9.0, 1.6);
     let led_x = BASE_W - PAD - sw - 12.0;
-    draw_led(p, led_x, 22.5, v.led, v.running && v.error.is_none());
+    draw_led(
+        p,
+        led_x,
+        22.5,
+        v.led,
+        active && v.error.is_none(),
+    );
+
+    // 输出模式开关：REC ONLY / ALWAYS
+    let (mx0, mw) = (238.0f32, 92.0f32);
+    let my = 30.0f32;
+    p.text_right(mx0 - 8.0, 43.0, 7.5, 1.4, "MODE", dim2());
+    l.mode_btn = (mx0, my, mw, 17.0);
+    p.round(mx0, my, mw, 17.0, 3.0, Color::from_rgba8(0x1b, 0x1f, 0x24, 255));
+    p.stroke(mx0, my, mw, 17.0, 3.0, Color::from_rgba8(0, 0, 0, 140), 1.0);
+    if rec_only {
+        p.round_vgrad(
+            mx0 + 2.0,
+            my + 2.0,
+            mw * 0.5 - 3.0,
+            13.0,
+            2.0,
+            Color::from_rgba8(0x31, 0x6f, 0x69, 255),
+            accent_dk(),
+        );
+    } else {
+        p.round_vgrad(
+            mx0 + mw * 0.5 + 1.0,
+            my + 2.0,
+            mw * 0.5 - 3.0,
+            13.0,
+            2.0,
+            Color::from_rgba8(0x31, 0x6f, 0x69, 255),
+            accent_dk(),
+        );
+    }
+    for (i, lab) in ["REC ONLY", "ALWAYS"].iter().enumerate() {
+        let cx = mx0 + mw * 0.5 * i as f32 + mw * 0.25;
+        let tw = p.text_w_of(lab, 7.5, 0.3);
+        let sel = (i == 0) == rec_only;
+        p.text(
+            cx - tw / 2.0 + 1.0,
+            my + 11.5,
+            7.5,
+            0.3,
+            lab,
+            if sel { text() } else { dim2() },
+        );
+    }
 
     // 缩放档位
     let cell_w = 30.0f32;
@@ -1113,7 +1177,7 @@ fn paint(p: &mut Painter, v: &View, l: &mut Layout) {
     let mx = BASE_W - PAD - 34.0 - bar_w * 2.0 - bar_gap;
     let mt = BODY_Y + 24.0;
     let mh = BODY_H - 62.0;
-    p.text(mx, mt - 9.0, 7.5, 1.4, "OUTPUT", dim2());
+    p.text(mx, mt - 9.0, 7.5, 1.4, "LEVEL · dB", dim2());
     for ch in 0..2 {
         let x = mx + ch as f32 * (bar_w + bar_gap);
         p.slot(x, mt, bar_w, mh, 3.0);
