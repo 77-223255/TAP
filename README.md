@@ -13,7 +13,8 @@ System audio into a DAW track, like a microphone. **PipeWire / CLAP / Linux**.
 **Record without hearing it** (like Live): track `Route` → untick `Master send`.
 Recording still works — the record tap sits before the send to the master.
 
-Knob is ±24 dB (double-click resets). The right-click menu also holds `Zoom 50–300%`.
+Knob is ±24 dB (double-click resets). The right-click menu holds `Capture` and a
+`Zoom ▸` submenu with 50–300 %.
 
 Full REAPER setup, export and troubleshooting → **[docs/reaper.md](docs/reaper.md)**
 
