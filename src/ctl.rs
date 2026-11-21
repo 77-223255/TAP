@@ -1,10 +1,33 @@
-//! 插件与 GUI 线程之间唯一的共享状态：全是原子量和普通互斥锁，
-//! 音频线程只碰原子量。
+//! 插件、GUI、音频线程之间唯一的共享状态。
+//!
+//! 音频线程只碰原子量；`Mutex` 只出现在设备列表、错误文本、缩放这些
+//! 与实时无关的地方。
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use crate::capture::SinkInfo;
+
+/// 界面缩放档位：50 / 100 / 150 / 200 / 250 / 300 %
+pub const ZOOMS: [f32; 6] = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0];
+
+pub fn zoom_scale(idx: i32) -> f32 {
+    ZOOMS[idx.clamp(0, ZOOMS.len() as i32 - 1) as usize]
+}
+
+/// 最接近某个缩放系数的档位下标
+pub fn zoom_index(scale: f32) -> i32 {
+    let mut best = 0i32;
+    let mut err = f32::MAX;
+    for (i, z) in ZOOMS.iter().enumerate() {
+        let e = (z - scale).abs();
+        if e < err {
+            err = e;
+            best = i as i32;
+        }
+    }
+    best
+}
 
 pub fn f32_to_bits(v: f32) -> u32 {
     v.to_bits()
@@ -15,20 +38,19 @@ pub fn bits_to_f32(v: u32) -> f32 {
 }
 
 pub struct Ctl {
-    pub meter: [AtomicU32; 2],
-    pub meter_hold: [AtomicU32; 2],
-    pub hold_age: [AtomicU32; 2],
-    pub fill: AtomicU32,
-    pub capacity: AtomicU32,
-    pub running: AtomicBool,
-    pub gain_db: AtomicU32,
-    pub source: AtomicI32,
-    pub sr: AtomicU32,
-    pub dropped: AtomicU64,
-    pub received: AtomicU64,
-    pub sinks: Mutex<Vec<SinkInfo>>,
-    pub want_start: Mutex<Option<Option<String>>>,
-    pub want_stop: AtomicBool,
+    meter: [AtomicU32; 2],
+    meter_hold: [AtomicU32; 2],
+    fill: AtomicU32,
+    capacity: AtomicU32,
+    running: AtomicBool,
+    gain_db: AtomicU32,
+    source: AtomicI32,
+    sr: AtomicU32,
+    dropped: AtomicU64,
+    error: Mutex<String>,
+    zoom: AtomicI32,
+    zoom_dirty: AtomicBool,
+    sinks: Mutex<Vec<SinkInfo>>,
 }
 
 impl Ctl {
@@ -36,7 +58,6 @@ impl Ctl {
         Self {
             meter: [AtomicU32::new(0), AtomicU32::new(0)],
             meter_hold: [AtomicU32::new(0), AtomicU32::new(0)],
-            hold_age: [AtomicU32::new(0), AtomicU32::new(0)],
             fill: AtomicU32::new(0),
             capacity: AtomicU32::new(32768),
             running: AtomicBool::new(false),
@@ -44,13 +65,14 @@ impl Ctl {
             source: AtomicI32::new(0),
             sr: AtomicU32::new(48000),
             dropped: AtomicU64::new(0),
-            received: AtomicU64::new(0),
+            error: Mutex::new(String::new()),
+            zoom: AtomicI32::new(1),
+            zoom_dirty: AtomicBool::new(false),
             sinks: Mutex::new(Vec::new()),
-            want_start: Mutex::new(None),
-            want_stop: AtomicBool::new(false),
         }
     }
 
+    // ---- 电平
     pub fn meter(&self, ch: usize) -> f32 {
         bits_to_f32(self.meter[ch].load(Ordering::Relaxed))
     }
@@ -64,6 +86,7 @@ impl Ctl {
         self.meter_hold[ch].store(f32_to_bits(v), Ordering::Relaxed);
     }
 
+    // ---- 增益
     pub fn gain_db(&self) -> f32 {
         bits_to_f32(self.gain_db.load(Ordering::Relaxed))
     }
@@ -71,6 +94,7 @@ impl Ctl {
         self.gain_db.store(f32_to_bits(v), Ordering::Relaxed);
     }
 
+    // ---- 输入源（0 = 跟随系统默认输出）
     pub fn source(&self) -> i32 {
         self.source.load(Ordering::Relaxed)
     }
@@ -78,6 +102,7 @@ impl Ctl {
         self.source.store(v, Ordering::Relaxed);
     }
 
+    // ---- 运行状态
     pub fn running(&self) -> bool {
         self.running.load(Ordering::Relaxed)
     }
@@ -85,11 +110,20 @@ impl Ctl {
         self.running.store(v, Ordering::Relaxed);
     }
 
+    // ---- 采样率
     pub fn sr(&self) -> u32 {
         self.sr.load(Ordering::Relaxed)
     }
+    pub fn set_sr(&self, v: u32) {
+        self.sr.store(v, Ordering::Relaxed);
+    }
+
+    // ---- 缓冲
     pub fn fill(&self) -> u32 {
         self.fill.load(Ordering::Relaxed)
+    }
+    pub fn set_fill(&self, v: u32) {
+        self.fill.store(v, Ordering::Relaxed);
     }
     pub fn capacity(&self) -> u32 {
         self.capacity.load(Ordering::Relaxed)
@@ -97,7 +131,46 @@ impl Ctl {
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }
+    pub fn set_dropped(&self, v: u64) {
+        self.dropped.store(v, Ordering::Relaxed);
+    }
 
+    // ---- 错误
+    pub fn error(&self) -> String {
+        self.error.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+    pub fn set_error(&self, v: String) {
+        if let Ok(mut g) = self.error.lock() {
+            if *g != v {
+                *g = v;
+            }
+        }
+    }
+
+    // ---- 缩放
+    pub fn zoom(&self) -> i32 {
+        self.zoom.load(Ordering::Relaxed)
+    }
+    pub fn zoom_scale(&self) -> f32 {
+        zoom_scale(self.zoom())
+    }
+    /// 用户/宿主改了缩放：标记需要向宿主申请新窗口尺寸
+    pub fn set_zoom(&self, idx: i32) {
+        let idx = idx.clamp(0, ZOOMS.len() as i32 - 1);
+        if self.zoom.swap(idx, Ordering::Relaxed) != idx {
+            self.zoom_dirty.store(true, Ordering::Relaxed);
+        }
+    }
+    /// 宿主自己定了尺寸：同步档位但不要再回敬一次 resize，免得来回拉锯
+    pub fn set_zoom_quiet(&self, idx: i32) {
+        self.zoom
+            .store(idx.clamp(0, ZOOMS.len() as i32 - 1), Ordering::Relaxed);
+    }
+    pub fn take_zoom_dirty(&self) -> bool {
+        self.zoom_dirty.swap(false, Ordering::Relaxed)
+    }
+
+    // ---- 设备列表
     pub fn sinks(&self) -> Vec<SinkInfo> {
         self.sinks.lock().map(|v| v.clone()).unwrap_or_default()
     }
@@ -107,23 +180,6 @@ impl Ctl {
                 *g = v;
             }
         }
-    }
-
-    /// GUI 请求开始捕获（None = 跟随系统默认输出）
-    pub fn request_start(&self, sink: Option<String>) {
-        if let Ok(mut g) = self.want_start.lock() {
-            *g = Some(sink);
-        }
-        self.want_stop.store(false, Ordering::Relaxed);
-    }
-    pub fn request_stop(&self) {
-        self.want_stop.store(true, Ordering::Relaxed);
-    }
-    pub fn take_start(&self) -> Option<Option<String>> {
-        self.want_start.lock().ok().and_then(|mut g| g.take())
-    }
-    pub fn take_stop(&self) -> bool {
-        self.want_stop.swap(false, Ordering::Relaxed)
     }
 }
 

@@ -1,16 +1,24 @@
 [package]
-name = "neilu"
-version = "0.1.0"
+name = "tap"
+version = "0.2.0"
 edition = "2021"
-description = "PipeWire system-audio capture as a CLAP plugin (内录)"
+description = "PipeWire system audio capture as a CLAP plugin (内录)"
 license = "GPL-3.0-or-later"
 
 [lib]
+# cdylib = CLAP 插件本体；rlib 只给 examples/tests 用，不是可安装的插件格式
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 clap-sys = "0.5.0"
 fontdue = "0.9.5"
+libc = "0.2"
 pipewire = "0.10.1"
 tiny-skia = "0.12.0"
-x11rb = "0.14.0"
+x11rb = { version = "0.14.0", features = ["shm"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

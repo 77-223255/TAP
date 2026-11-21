@@ -12,7 +12,6 @@ use clap_sys::events::{
     clap_event_header, clap_event_param_value, clap_input_events, clap_output_events,
     CLAP_EVENT_PARAM_VALUE,
 };
-use clap_sys::stream::{clap_istream, clap_ostream};
 use clap_sys::ext::audio_ports::*;
 use clap_sys::ext::gui::*;
 use clap_sys::ext::latency::clap_plugin_latency;
@@ -20,18 +19,24 @@ use clap_sys::ext::params::*;
 use clap_sys::ext::state::*;
 use clap_sys::factory::plugin_factory::clap_plugin_factory;
 use clap_sys::host::clap_host;
+use clap_sys::id::CLAP_INVALID_ID;
 use clap_sys::plugin::*;
 use clap_sys::process::clap_process;
+use clap_sys::stream::{clap_istream, clap_ostream};
 use clap_sys::string_sizes::{CLAP_NAME_SIZE, CLAP_PATH_SIZE};
 use clap_sys::version::CLAP_VERSION;
 
 use crate::capture::Capture;
-use crate::ctl::Ctl;
-use crate::gui::{Gui, HEIGHT, WIDTH};
+use crate::ctl::{zoom_index, Ctl, ZOOMS};
+use crate::gui::{self, Gui};
 use crate::ring::{Frame, Ring};
 
 const PARAM_GAIN: u32 = 1;
 const PARAM_SOURCE: u32 = 2;
+const PARAM_ZOOM: u32 = 3;
+
+/// 缓冲目标：60 ms。既是延迟补偿值，也是漂移补偿的平衡点。
+const FILL_SECS: f64 = 0.060;
 
 // ---------------------------------------------------------------- 描述符
 
@@ -46,14 +51,14 @@ static FEATURES: FeaturePtrs = FeaturePtrs([
 
 static DESC: clap_plugin_descriptor = clap_plugin_descriptor {
     clap_version: CLAP_VERSION,
-    id: b"dev.neilu.capture\0".as_ptr() as *const c_char,
-    name: b"NeiLu Capture\0".as_ptr() as *const c_char,
-    vendor: b"neilu\0".as_ptr() as *const c_char,
+    id: b"dev.tap.capture\0".as_ptr() as *const c_char,
+    name: b"TAP\0".as_ptr() as *const c_char,
+    vendor: b"shienze\0".as_ptr() as *const c_char,
     url: b"https://github.com/77-223255/neilu\0".as_ptr() as *const c_char,
     manual_url: b"https://github.com/77-223255/neilu#readme\0".as_ptr() as *const c_char,
     support_url: b"https://github.com/77-223255/neilu/issues\0".as_ptr() as *const c_char,
-    version: b"0.1.0\0".as_ptr() as *const c_char,
-    description: b"PipeWire system audio capture straight into your DAW track\0".as_ptr()
+    version: concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const c_char,
+    description: b"System audio (PipeWire sink monitor) straight into your DAW track\0".as_ptr()
         as *const c_char,
     features: FEATURES.0.as_ptr(),
 };
@@ -61,9 +66,10 @@ static DESC: clap_plugin_descriptor = clap_plugin_descriptor {
 // ---------------------------------------------------------------- 插件对象
 
 #[repr(C)]
-pub struct NeiLu {
+pub struct Tap {
     clap: clap_plugin,
     host: *const clap_host,
+    host_gui: *const clap_host_gui,
     // 各个扩展的静态 vtable（生命周期必须 >= 插件）
     ext_audio_ports: clap_plugin_audio_ports,
     ext_params: clap_plugin_params,
@@ -72,7 +78,7 @@ pub struct NeiLu {
     ext_gui: clap_plugin_gui,
 
     ctl: Arc<Ctl>,
-    capture: Capture,
+    capture: Arc<Capture>,
     ring: Arc<Ring>,
 
     gui: Option<Box<Gui>>,
@@ -81,19 +87,16 @@ pub struct NeiLu {
     prev: Frame,
     cur: Frame,
     phase: f64,
-    rate: f64,
     hold: [f32; 2],
     hold_age: [u32; 2],
     autostarted: bool,
 }
 
-impl NeiLu {
+impl Tap {
     fn new(host: *const clap_host) -> *const clap_plugin {
-        let capture = Capture::new();
+        let capture = Arc::new(Capture::new());
         let ring = capture.ring();
         let ctl = Arc::new(Ctl::new());
-        ctl.capacity
-            .store(ring.capacity() as u32, std::sync::atomic::Ordering::Relaxed);
 
         let mut boxed = Box::new(Self {
             clap: clap_plugin {
@@ -111,6 +114,7 @@ impl NeiLu {
                 on_main_thread: Some(s_on_main_thread),
             },
             host,
+            host_gui: std::ptr::null(),
             ext_audio_ports: clap_plugin_audio_ports {
                 count: Some(ap_count),
                 get: Some(ap_get),
@@ -127,9 +131,7 @@ impl NeiLu {
                 save: Some(st_save),
                 load: Some(st_load),
             },
-            ext_latency: clap_plugin_latency {
-                get: Some(la_get),
-            },
+            ext_latency: clap_plugin_latency { get: Some(la_get) },
             ext_gui: clap_plugin_gui {
                 is_api_supported: Some(gu_is_api_supported),
                 get_preferred_api: Some(gu_get_preferred_api),
@@ -155,7 +157,6 @@ impl NeiLu {
             prev: Frame::default(),
             cur: Frame::default(),
             phase: 1.0,
-            rate: 1.0,
             hold: [0.0; 2],
             hold_age: [0; 2],
             autostarted: false,
@@ -166,62 +167,121 @@ impl NeiLu {
         Box::into_raw(boxed) as *const clap_plugin
     }
 
-    /// 主线程上的杂活：把 GUI 的请求落到 PipeWire，把状态回填给 GUI。
+    fn request_callback(&self) {
+        if self.host.is_null() {
+            return;
+        }
+        unsafe {
+            if let Some(f) = (*self.host).request_callback {
+                f(self.host);
+            }
+        }
+    }
+
+    /// 把缩放档位对应的窗口尺寸报给宿主（必须在主线程）
+    fn apply_zoom(&self) {
+        if self.host.is_null() || self.host_gui.is_null() {
+            return;
+        }
+        let (w, h) = gui::size_for(self.ctl.zoom_scale());
+        unsafe {
+            if let Some(f) = (*self.host_gui).request_resize {
+                f(self.host, w, h);
+            }
+        }
+    }
+
+    /// 按当前参数开始抓音（0 = 跟随系统默认输出）
+    fn start_selected(&self) {
+        let idx = self.ctl.source().max(0);
+        let sink = if idx == 0 {
+            None
+        } else {
+            self.capture
+                .sinks()
+                .get((idx - 1) as usize)
+                .map(|s| s.name.clone())
+        };
+        self.capture.start(sink.as_deref());
+    }
+
+    /// 主线程上的杂活：状态回填、缩放落地、首次自动开抓。
     fn tick(&mut self) {
-        // 第一次 tick 就自动开始抓系统默认输出，插上就能录
         if !self.autostarted {
             self.autostarted = true;
-            self.capture.start(None, self.sr as u32);
-        }
-        if let Some(sink) = self.ctl.take_start() {
-            self.ctl.sr.store(self.sr as u32, std::sync::atomic::Ordering::Relaxed);
-            self.capture.start(sink.as_deref(), self.sr as u32);
-
-            self.ring.reset();
-        }
-        if self.ctl.take_stop() {
-            self.capture.stop();
+            self.start_selected();
+        } else if self.capture.is_running() {
+            // 参数自动化改了输入源：在这里落地，音频线程不碰设备列表
+            let idx = self.ctl.source().max(0);
+            let sinks = self.capture.sinks();
+            let want = if idx == 0 {
+                Some(None)
+            } else {
+                sinks.get((idx - 1) as usize).map(|x| Some(x.name.clone()))
+            };
+            if let Some(want) = want {
+                if self.capture.target() != want {
+                    self.capture.start(want.as_deref());
+                }
+            }
         }
         self.ctl.set_running(self.capture.is_running());
         self.ctl.set_sinks(self.capture.sinks());
-        self.ctl
-            .fill
-            .store(self.ring.available() as u32, std::sync::atomic::Ordering::Relaxed);
-        self.ctl
-            .dropped
-            .store(self.capture.dropped_frames(), std::sync::atomic::Ordering::Relaxed);
+        self.ctl.set_error(self.capture.error());
+        self.ctl.set_sr(self.sr as u32);
+        if self.ctl.take_zoom_dirty() {
+            self.apply_zoom();
+            self.request_callback();
+        }
     }
 }
 
-unsafe fn me<'a>(p: *const clap_plugin) -> &'a mut NeiLu {
-    &mut *((*p).plugin_data as *mut NeiLu)
+unsafe fn me<'a>(p: *const clap_plugin) -> &'a mut Tap {
+    &mut *((*p).plugin_data as *mut Tap)
 }
 
 // ---------------------------------------------------------------- 基本接口
 
-unsafe extern "C" fn s_init(_p: *const clap_plugin) -> bool {
+unsafe extern "C" fn s_init(p: *const clap_plugin) -> bool {
+    let s = me(p);
+    if s.host.is_null() {
+        return true;
+    }
+    if let Some(get) = (*s.host).get_extension {
+        let id = b"clap.gui\0".as_ptr() as *const c_char;
+        let ptr = get(s.host, id) as *const clap_host_gui;
+        if !ptr.is_null() {
+            s.host_gui = ptr;
+        }
+    }
     true
 }
 
 unsafe extern "C" fn s_destroy(p: *const clap_plugin) {
-    drop(Box::from_raw((*p).plugin_data as *mut NeiLu));
+    drop(Box::from_raw((*p).plugin_data as *mut Tap));
 }
 
 unsafe extern "C" fn s_activate(p: *const clap_plugin, sr: f64, _min: u32, _max: u32) -> bool {
     let s = me(p);
     s.sr = if sr > 0.0 { sr } else { 48000.0 };
-    s.ctl
-        .sr
-        .store(s.sr as u32, std::sync::atomic::Ordering::Relaxed);
+    s.ctl.set_sr(s.sr as u32);
     s.phase = 1.0;
+    s.prev = Frame::default();
+    s.cur = Frame::default();
+    s.ring.reset();
     true
 }
 
-unsafe extern "C" fn s_deactivate(_p: *const clap_plugin) {}
+unsafe extern "C" fn s_deactivate(p: *const clap_plugin) {
+    me(p).capture.stop();
+}
 
 unsafe extern "C" fn s_start_processing(p: *const clap_plugin) -> bool {
     let s = me(p);
     s.tick();
+    // 宿主可能刚从「没在处理」恢复：扔掉积压，从当前的 60ms 重新开始
+    s.ring.reset();
+    s.phase = 1.0;
     true
 }
 
@@ -240,23 +300,13 @@ unsafe extern "C" fn s_on_main_thread(p: *const clap_plugin) {
 // ---------------------------------------------------------------- 处理
 
 unsafe extern "C" fn s_process(p: *const clap_plugin, proc: *const clap_process) -> i32 {
+    if proc.is_null() {
+        return 0;
+    }
     let s = me(p);
     let pr = &*proc;
 
-    // 参数自动化
-    if !pr.in_events.is_null() {
-        let ev = &*pr.in_events;
-        if let (Some(size), Some(get)) = (ev.size, ev.get) {
-            for i in 0..size(ev) {
-                let h = get(ev, i);
-                if h.is_null() || (*h).type_ != CLAP_EVENT_PARAM_VALUE {
-                    continue;
-                }
-                let pv = &*(h as *const clap_event_param_value);
-                apply_param(s, pv.param_id, pv.value);
-            }
-        }
-    }
+    read_events(s, pr.in_events);
 
     if pr.audio_outputs_count == 0 || pr.frames_count == 0 {
         return 0;
@@ -265,51 +315,84 @@ unsafe extern "C" fn s_process(p: *const clap_plugin, proc: *const clap_process)
     if ob.channel_count == 0 || ob.data32.is_null() {
         return 0;
     }
+    let out_l = *ob.data32;
+    if out_l.is_null() {
+        return 0;
+    }
+    let out_r = if ob.channel_count > 1 {
+        *ob.data32.add(1)
+    } else {
+        out_l
+    };
 
     let frames = pr.frames_count as usize;
     let gain = 10f32.powf(s.ctl.gain_db() / 20.0);
-    let ring = s.ring.clone();
+    let host_sr = if s.sr > 0.0 { s.sr } else { 48000.0 };
+    let card_sr = s.capture.rate();
 
+    // 声卡速率 / 宿主速率 = 每输出一帧要凑多少输入帧
+    let ratio = if card_sr > 0 {
+        card_sr as f64 / host_sr
+    } else {
+        1.0
+    };
     // 时钟漂移补偿：按缓冲填充量微调播放速率，避免长期累积成爆音
-    let target = (s.sr * 0.1) as f64;
-    let avail = ring.available() as f64;
-    let err = ((avail - target) / target.max(1.0)).clamp(-0.5, 0.5);
-    s.rate = 1.0 + err * 0.02;
-
-    let mut peak = [0f32; 2];
-    for i in 0..frames {
-        if s.phase >= 1.0 {
-            s.prev = s.cur;
-            if !ring.read_one(&mut s.cur) {
-                s.cur = Frame::default();
-            }
-            s.phase -= 1.0;
+    let target = host_sr * FILL_SECS;
+    let ring: *const Ring = &*s.ring;
+    let mut avail = (*ring).available() as f64;
+    if avail > target * 4.0 {
+        // 宿主停过一阵（积压到半秒以上）：跳到目标填充量，别放隔夜菜
+        let mut skip = (avail - target) as usize;
+        let mut tmp = Frame::default();
+        while skip > 0 && (*ring).read_one(&mut tmp) {
+            skip -= 1;
         }
-        let t = s.phase as f32;
-        let l = s.prev.l + (s.cur.l - s.prev.l) * t;
-        let r = s.prev.r + (s.cur.r - s.prev.r) * t;
-        s.phase += s.rate;
+        avail = (*ring).available() as f64;
+    }
+    let err = ((avail - target) / target.max(1.0)).clamp(-0.5, 0.5);
+    let step = ratio * (1.0 + err * 0.02);
 
-        let lo = l * gain;
-        let ro = r * gain;
-        peak[0] = peak[0].max(lo.abs());
-        peak[1] = peak[1].max(ro.abs());
+    let mut prev = s.prev;
+    let mut cur = s.cur;
+    let mut phase = s.phase;
+    let mut peak = [0f32; 2];
 
-        let ch0 = *ob.data32;
-        *ch0.add(i) = lo;
-        if ob.channel_count > 1 {
-            let ch1 = *ob.data32.add(1);
-            *ch1.add(i) = ro;
+    for i in 0..frames {
+        // ratio > 1 时一帧输出可能要吃掉两帧输入，所以必须是 while 不是 if
+        while phase >= 1.0 {
+            prev = cur;
+            if !(*ring).read_one(&mut cur) {
+                cur = Frame::default();
+            }
+            phase -= 1.0;
+        }
+        let t = phase.clamp(0.0, 1.0) as f32;
+        let l = (prev.l + (cur.l - prev.l) * t) * gain;
+        let r = (prev.r + (cur.r - prev.r) * t) * gain;
+        phase += step;
+
+        peak[0] = peak[0].max(l.abs());
+        peak[1] = peak[1].max(r.abs());
+
+        *out_l.add(i) = l;
+        if out_r != out_l {
+            *out_r.add(i) = r;
+        } else {
+            *out_l.add(i) = 0.5 * (l + r);
         }
     }
 
+    s.prev = prev;
+    s.cur = cur;
+    s.phase = phase;
+
     // 电平表 + 峰值保持
     for ch in 0..2 {
-        let prev = s.ctl.meter(ch);
-        let shown = if peak[ch] > prev {
+        let prev_level = s.ctl.meter(ch);
+        let shown = if peak[ch] > prev_level {
             peak[ch]
         } else {
-            prev * 0.86
+            prev_level * 0.86
         };
         s.ctl.set_meter(ch, shown);
         if shown >= s.hold[ch] {
@@ -317,33 +400,51 @@ unsafe extern "C" fn s_process(p: *const clap_plugin, proc: *const clap_process)
             s.hold_age[ch] = 0;
         } else {
             s.hold_age[ch] = s.hold_age[ch].saturating_add(frames as u32);
-            if s.hold_age[ch] as f64 > s.sr * 1.1 {
+            if s.hold_age[ch] as f64 > host_sr * 1.1 {
                 s.hold[ch] *= 0.92;
             }
         }
         s.ctl.set_hold(ch, s.hold[ch]);
     }
-    s.ctl
-        .fill
-        .store(ring.available() as u32, std::sync::atomic::Ordering::Relaxed);
-    s.ctl.set_running(s.capture.is_running());
 
+    s.ctl.set_fill(s.ring.available() as u32);
+    s.ctl.set_dropped(s.capture.dropped_frames());
     0
 }
 
-fn apply_param(s: &mut NeiLu, id: u32, value: f64) {
+unsafe fn read_events(s: &mut Tap, events: *const clap_input_events) {
+    if events.is_null() {
+        return;
+    }
+    let ev = &*events;
+    let (Some(size), Some(get)) = (ev.size, ev.get) else {
+        return;
+    };
+    for i in 0..size(ev) {
+        let h: *const clap_event_header = get(ev, i);
+        if h.is_null() || (*h).type_ != CLAP_EVENT_PARAM_VALUE {
+            continue;
+        }
+        let pv = &*(h as *const clap_event_param_value);
+        apply_param(s, pv.param_id, pv.value);
+    }
+}
+
+fn apply_param(s: &mut Tap, id: u32, value: f64) {
     match id {
         PARAM_GAIN => s.ctl.set_gain_db(value as f32),
         PARAM_SOURCE => {
             let idx = value.max(0.0) as i32;
             if idx != s.ctl.source() {
                 s.ctl.set_source(idx);
-                let sink = if idx == 0 {
-                    None
-                } else {
-                    s.ctl.sinks().get((idx - 1) as usize).map(|x| x.name.clone())
-                };
-                s.ctl.request_start(sink);
+                s.request_callback();
+            }
+        }
+        PARAM_ZOOM => {
+            let idx = value.max(0.0).round() as i32;
+            if idx != s.ctl.zoom() {
+                s.ctl.set_zoom(idx);
+                s.request_callback();
             }
         }
         _ => {}
@@ -353,6 +454,9 @@ fn apply_param(s: &mut NeiLu, id: u32, value: f64) {
 // ---------------------------------------------------------------- 扩展
 
 unsafe extern "C" fn s_get_extension(p: *const clap_plugin, id: *const c_char) -> *const c_void {
+    if id.is_null() {
+        return std::ptr::null();
+    }
     let s = me(p);
     let name = std::ffi::CStr::from_ptr(id).to_bytes();
     match name {
@@ -378,7 +482,7 @@ unsafe extern "C" fn ap_get(
     is_input: bool,
     info: *mut clap_audio_port_info,
 ) -> bool {
-    if index != 0 {
+    if index != 0 || info.is_null() {
         return false;
     }
     let i = &mut *info;
@@ -387,7 +491,8 @@ unsafe extern "C" fn ap_get(
     i.flags = CLAP_AUDIO_PORT_IS_MAIN;
     i.channel_count = 2;
     i.port_type = CLAP_PORT_STEREO.as_ptr();
-    i.in_place_pair = !is_input as u32;
+    // 不做 in-place：输入我们不读，输出写自己的内存最稳
+    i.in_place_pair = CLAP_INVALID_ID;
     true
 }
 
@@ -400,7 +505,7 @@ fn write_name(dst: &mut [c_char; CLAP_NAME_SIZE], s: &str) {
 // ---- params
 
 unsafe extern "C" fn pa_count(_p: *const clap_plugin) -> u32 {
-    2
+    3
 }
 
 unsafe extern "C" fn pa_get_info(
@@ -408,6 +513,9 @@ unsafe extern "C" fn pa_get_info(
     index: u32,
     info: *mut clap_param_info,
 ) -> bool {
+    if info.is_null() {
+        return false;
+    }
     let i = &mut *info;
     i.module = [0; CLAP_PATH_SIZE];
     i.cookie = std::ptr::null_mut();
@@ -424,24 +532,34 @@ unsafe extern "C" fn pa_get_info(
         1 => {
             i.id = PARAM_SOURCE;
             write_name(&mut i.name, "Source");
-            i.flags = CLAP_PARAM_IS_STEPPED;
+            i.flags = CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_ENUM;
             i.min_value = 0.0;
             i.max_value = 32.0;
             i.default_value = 0.0;
+            true
+        }
+        2 => {
+            i.id = PARAM_ZOOM;
+            write_name(&mut i.name, "UI Zoom");
+            i.flags = CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_ENUM;
+            i.min_value = 0.0;
+            i.max_value = (ZOOMS.len() - 1) as f64;
+            i.default_value = 1.0;
             true
         }
         _ => false,
     }
 }
 
-unsafe extern "C" fn pa_get_value(_p: *const clap_plugin, id: u32, out: *mut f64) -> bool {
-    let s = me(_p);
+unsafe extern "C" fn pa_get_value(p: *const clap_plugin, id: u32, out: *mut f64) -> bool {
     if out.is_null() {
         return false;
     }
+    let s = me(p);
     match id {
         PARAM_GAIN => *out = s.ctl.gain_db() as f64,
         PARAM_SOURCE => *out = s.ctl.source() as f64,
+        PARAM_ZOOM => *out = s.ctl.zoom() as f64,
         _ => return false,
     }
     true
@@ -462,12 +580,17 @@ unsafe extern "C" fn pa_value_to_text(
             if idx == 0 {
                 "System default".to_string()
             } else {
-                s.ctl
+                s.capture
                     .sinks()
                     .get(idx - 1)
                     .map(|x| x.label.clone())
                     .unwrap_or_else(|| "-".to_string())
             }
+        }
+        PARAM_ZOOM => {
+            let idx = value.max(0.0).round() as usize;
+            let z = ZOOMS.get(idx).copied().unwrap_or(1.0);
+            format!("{:.0} %", z * 100.0)
         }
         _ => return false,
     };
@@ -476,15 +599,18 @@ unsafe extern "C" fn pa_value_to_text(
 }
 
 unsafe extern "C" fn pa_text_to_value(
-    _p: *const clap_plugin,
+    p: *const clap_plugin,
     id: u32,
     text: *const c_char,
     out: *mut f64,
 ) -> bool {
-    let s = std::ffi::CStr::from_ptr(text).to_string_lossy().to_string();
+    if text.is_null() || out.is_null() {
+        return false;
+    }
+    let txt = std::ffi::CStr::from_ptr(text).to_string_lossy().to_string();
     match id {
         PARAM_GAIN => {
-            let cleaned = s.trim_end_matches("dB").trim();
+            let cleaned = txt.trim_end_matches("dB").trim();
             match cleaned.parse::<f64>() {
                 Ok(v) => {
                     *out = v.clamp(-24.0, 24.0);
@@ -494,13 +620,27 @@ unsafe extern "C" fn pa_text_to_value(
             }
         }
         PARAM_SOURCE => {
-            let me_ = me(_p);
-            match me_.ctl.sinks().iter().position(|x| x.label == s) {
+            if txt.trim() == "System default" {
+                *out = 0.0;
+                return true;
+            }
+            match me(p).capture.sinks().iter().position(|x| x.label == txt) {
                 Some(i) => {
                     *out = (i + 1) as f64;
                     true
                 }
                 None => false,
+            }
+        }
+        PARAM_ZOOM => {
+            let cleaned = txt.trim_end_matches('%').trim();
+            match cleaned.parse::<f64>() {
+                Ok(v) => {
+                    let idx = zoom_index((v / 100.0) as f32);
+                    *out = idx as f64;
+                    true
+                }
+                Err(_) => false,
             }
         }
         _ => false,
@@ -512,21 +652,8 @@ unsafe extern "C" fn pa_flush(
     input: *const clap_input_events,
     _output: *const clap_output_events,
 ) {
-    if input.is_null() {
-        return;
-    }
     let s = me(p);
-    let ev = &*input;
-    if let (Some(size), Some(get)) = (ev.size, ev.get) {
-        for i in 0..size(ev) {
-            let h: *const clap_event_header = get(ev, i);
-            if h.is_null() || (*h).type_ != CLAP_EVENT_PARAM_VALUE {
-                continue;
-            }
-            let pv = &*(h as *const clap_event_param_value);
-            apply_param(s, pv.param_id, pv.value);
-        }
-    }
+    read_events(s, input);
 }
 
 fn write_cstr(dst: *mut c_char, size: u32, s: &str) {
@@ -543,28 +670,33 @@ fn write_cstr(dst: *mut c_char, size: u32, s: &str) {
 // ---- state
 
 unsafe extern "C" fn st_save(p: *const clap_plugin, stream: *const clap_ostream) -> bool {
-    let s = me(p);
     if stream.is_null() {
         return false;
     }
+    let s = me(p);
     let sink = if s.ctl.source() <= 0 {
         "auto".to_string()
     } else {
-        s.ctl
+        s.capture
             .sinks()
-            .get((s.ctl.source() - 1).max(0) as usize)
+            .get((s.ctl.source() - 1) as usize)
             .map(|x| x.name.clone())
             .unwrap_or_else(|| "auto".to_string())
     };
-    let text = format!("sink={}\ngain_db={}\n", sink, s.ctl.gain_db());
+    let text = format!(
+        "sink={}\ngain_db={}\nzoom={}\n",
+        sink,
+        s.ctl.gain_db(),
+        s.ctl.zoom()
+    );
     write_stream(stream, text.as_bytes())
 }
 
 unsafe extern "C" fn st_load(p: *const clap_plugin, stream: *const clap_istream) -> bool {
-    let s = me(p);
     if stream.is_null() {
         return false;
     }
+    let s = me(p);
     let mut buf = [0u8; 1024];
     let mut len = 0usize;
     while len < buf.len() {
@@ -573,7 +705,7 @@ unsafe extern "C" fn st_load(p: *const clap_plugin, stream: *const clap_istream)
         if n <= 0 {
             break;
         }
-        let n = n as usize;
+        let n = (n as usize).min(buf.len() - len);
         buf[len..len + n].copy_from_slice(&chunk[..n]);
         len += n;
     }
@@ -583,14 +715,17 @@ unsafe extern "C" fn st_load(p: *const clap_plugin, stream: *const clap_istream)
             let v = v.trim().to_string();
             if v == "auto" || v.is_empty() {
                 s.ctl.set_source(0);
-                s.ctl.request_start(None);
-            } else if let Some(i) = s.ctl.sinks().iter().position(|x| x.name == v) {
+            } else if let Some(i) = s.capture.sinks().iter().position(|x| x.name == v) {
                 s.ctl.set_source((i + 1) as i32);
-                s.ctl.request_start(Some(v));
             }
         } else if let Some(v) = line.strip_prefix("gain_db=") {
             if let Ok(g) = v.trim().parse::<f32>() {
                 s.ctl.set_gain_db(g);
+            }
+        } else if let Some(v) = line.strip_prefix("zoom=") {
+            if let Ok(z) = v.trim().parse::<i32>() {
+                s.ctl.set_zoom(z);
+                s.request_callback();
             }
         }
     }
@@ -620,7 +755,7 @@ unsafe fn read_stream(stream: *const clap_istream, dst: &mut [u8]) -> i64 {
 
 unsafe extern "C" fn la_get(p: *const clap_plugin) -> u32 {
     let s = me(p);
-    (s.sr * 0.1) as u32
+    (s.sr * FILL_SECS) as u32
 }
 
 // ---- gui
@@ -630,7 +765,7 @@ unsafe extern "C" fn gu_is_api_supported(
     api: *const c_char,
     is_floating: bool,
 ) -> bool {
-    is_floating && api.is_null() && false || (!is_floating && api_matches(api, b"x11"))
+    !is_floating && api_matches(api, b"x11")
 }
 
 fn api_matches(api: *const c_char, name: &[u8]) -> bool {
@@ -662,7 +797,11 @@ unsafe extern "C" fn gu_create(p: *const clap_plugin, api: *const c_char, is_flo
     }
     let s = me(p);
     if s.gui.is_none() {
-        s.gui = Some(Box::new(Gui::new(s.ctl.clone())));
+        s.gui = Some(Box::new(Gui::new(
+            s.ctl.clone(),
+            s.capture.clone(),
+            s.host,
+        )));
     }
     true
 }
@@ -675,21 +814,19 @@ unsafe extern "C" fn gu_set_scale(_p: *const clap_plugin, _scale: f64) -> bool {
     true
 }
 
-unsafe extern "C" fn gu_get_size(
-    _p: *const clap_plugin,
-    w: *mut u32,
-    h: *mut u32,
-) -> bool {
+unsafe extern "C" fn gu_get_size(p: *const clap_plugin, w: *mut u32, h: *mut u32) -> bool {
     if w.is_null() || h.is_null() {
         return false;
     }
-    *w = WIDTH;
-    *h = HEIGHT;
+    let s = me(p);
+    let (gw, gh) = gui::size_for(s.ctl.zoom_scale());
+    *w = gw;
+    *h = gh;
     true
 }
 
 unsafe extern "C" fn gu_can_resize(_p: *const clap_plugin) -> bool {
-    false
+    true
 }
 
 unsafe extern "C" fn gu_get_resize_hints(
@@ -700,6 +837,7 @@ unsafe extern "C" fn gu_get_resize_hints(
         return false;
     }
     let h = &mut *hints;
+    // 只接受自己的档位，不让宿主自由拉
     h.can_resize_horizontally = false;
     h.can_resize_vertically = false;
     h.preserve_aspect_ratio = false;
@@ -708,21 +846,23 @@ unsafe extern "C" fn gu_get_resize_hints(
     true
 }
 
-unsafe extern "C" fn gu_adjust_size(
-    _p: *const clap_plugin,
-    w: *mut u32,
-    h: *mut u32,
-) -> bool {
+unsafe extern "C" fn gu_adjust_size(p: *const clap_plugin, w: *mut u32, h: *mut u32) -> bool {
     if w.is_null() || h.is_null() {
         return false;
     }
-    *w = WIDTH;
-    *h = HEIGHT;
+    let s = me(p);
+    let (gw, gh) = gui::size_for(s.ctl.zoom_scale());
+    *w = gw;
+    *h = gh;
     true
 }
 
 unsafe extern "C" fn gu_set_size(p: *const clap_plugin, w: u32, h: u32) -> bool {
+    if w == 0 || h == 0 {
+        return false;
+    }
     let s = me(p);
+    s.ctl.set_zoom_quiet(zoom_index(w as f32 / gui::BASE_W));
     if let Some(g) = s.gui.as_mut() {
         g.resize(w, h);
     }
@@ -733,22 +873,19 @@ unsafe extern "C" fn gu_set_parent(p: *const clap_plugin, window: *const clap_wi
     if window.is_null() {
         return false;
     }
-    let s = me(p);
     let win = &*window;
     if !api_matches(win.api, b"x11") {
         return false;
     }
     let parent = win.specific.x11 as u32;
+    let s = me(p);
     match s.gui.as_mut() {
         Some(g) => g.attach(parent),
         None => false,
     }
 }
 
-unsafe extern "C" fn gu_set_transient(
-    _p: *const clap_plugin,
-    _window: *const clap_window,
-) -> bool {
+unsafe extern "C" fn gu_set_transient(_p: *const clap_plugin, _window: *const clap_window) -> bool {
     true
 }
 
@@ -792,7 +929,7 @@ unsafe extern "C" fn factory_create(
     if want != got {
         return std::ptr::null();
     }
-    NeiLu::new(host)
+    Tap::new(host)
 }
 
 pub static PLUGIN_FACTORY: clap_plugin_factory = clap_plugin_factory {
