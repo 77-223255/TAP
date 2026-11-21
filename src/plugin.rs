@@ -339,6 +339,27 @@ unsafe extern "C" fn s_process(p: *const clap_plugin, proc: *const clap_process)
     let frames = pr.frames_count as usize;
     let host_sr = if s.sr > 0.0 { s.sr } else { 48000.0 };
 
+    // 输入：这条轨上原本要流过去的东西（比如已经录好的片段）。
+    // 我们是插入式效果，必须把它原样带下去，否则重放会没声。
+    let (in_l, in_r) = if pr.audio_inputs_count > 0 && !pr.audio_inputs.is_null() {
+        let ib = &*pr.audio_inputs;
+        let l = if ib.data32.is_null() || ib.channel_count == 0 {
+            std::ptr::null()
+        } else {
+            *ib.data32
+        };
+        let r = if l.is_null() {
+            std::ptr::null()
+        } else if ib.channel_count > 1 {
+            *ib.data32.add(1)
+        } else {
+            l
+        };
+        (l, r)
+    } else {
+        (std::ptr::null(), std::ptr::null())
+    };
+
     // ── 只在录音时输出 ──
     // 录完之后重放工程时，如果插件还在往外吐实时声音，就会和录好的片段叠在一起，
     // 听起来像「宿主又放了一遍」。所以默认只在 transport 处于录音状态时输出。
@@ -349,10 +370,14 @@ unsafe extern "C" fn s_process(p: *const clap_plugin, proc: *const clap_process)
     s.ctl.set_recording(s.recording);
     let gated = s.ctl.mode() == 0 && s.transport_seen && !s.recording;
     if gated {
+        // 不录音：只透传输入，不叠加实时捕获
         for i in 0..frames {
-            *out_l.add(i) = 0.0;
+            let l = if in_l.is_null() { 0.0 } else { *in_l.add(i) };
+            let r = if in_r.is_null() { l } else { *in_r.add(i) };
+            let (l, r) = if out_r != out_l { (l, r) } else { (0.5 * (l + r), 0.0) };
+            *out_l.add(i) = l;
             if out_r != out_l {
-                *out_r.add(i) = 0.0;
+                *out_r.add(i) = r;
             }
         }
         // 环形缓冲不动它，电平自然回落
@@ -429,8 +454,10 @@ unsafe extern "C" fn s_process(p: *const clap_plugin, proc: *const clap_process)
             phase -= 1.0;
         }
         let t = phase.clamp(0.0, 1.0) as f32;
-        let l = (prev.l + (cur.l - prev.l) * t) * gain;
-        let r = (prev.r + (cur.r - prev.r) * t) * gain;
+        let il = if in_l.is_null() { 0.0 } else { *in_l.add(i) };
+        let ir = if in_r.is_null() { il } else { *in_r.add(i) };
+        let l = il + (prev.l + (cur.l - prev.l) * t) * gain;
+        let r = ir + (prev.r + (cur.r - prev.r) * t) * gain;
         phase += step;
 
         peak[0] = peak[0].max(l.abs());
