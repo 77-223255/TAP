@@ -34,7 +34,7 @@ const GAIN_MARK: f32 = KNOB_R + 25.0;
 /// 行程角：±135°
 const A0: f32 = -2.356;
 const A1: f32 = 2.356;
-const ROW_H: f32 = 22.0;
+const ROW_H: f32 = 20.0;
 const SEP_H: f32 = 9.0;
 
 pub fn size_for(scale: f32) -> (u32, u32) {
@@ -519,7 +519,7 @@ fn build_menu(ctl: &Ctl, p: &Painter, x: f32, y: f32) -> Menu {
     for r in &rows {
         w = w.max(p.text_w_of(&r.label, 10.5, 0.2));
     }
-    let w = w + 44.0;
+    let w = w + 40.0;
     let mut menu = Menu {
         x,
         y,
