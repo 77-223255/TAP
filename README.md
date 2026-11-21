@@ -22,11 +22,26 @@ TAP 把这件事搬进插件：它自己作为 PipeWire 客户端去抓任意 Si
 
 ## 用法（REAPER 为例）
 
-1. 在轨道上插入 **TAP**
-2. 把该轨道录音模式改成 **Record: output (stereo)**，按录音键
-3. 插件插入时就已经开始抓系统默认输出了；想换设备点左边的列表
+1. 在轨道上插入 **TAP**（插入即开始抓系统默认输出，想换设备点左边列表）
+2. 轨道录音模式：右键录音按钮 / 右键轨道 → `Record: output (stereo)`，
+   **再点一次选择子模式**：`post fader` / `post-fx pre-fader` / `pre fx`
+   （想没了推子影响就选 `post-fx pre-fader`）
+3. 想边录边听：打开轨道的 **录音监听**（Record monitoring）
+4. 按录音键。轨道上就会出现捕获到的音频
 
 想单独抓某个程序（浏览器、播放器）：把它指到某个输出设备，然后在列表里选那个设备。
+
+### 轨道没反应？按这个顺序看
+
+1. **插件界面的电平在动吗？** 在动 = 抓音没问题，问题在宿主侧；不动 = 抓音没起来（看底栏错误文本）
+2. **宿主在处理这个轨道吗？** REAPER 只在需要时才跑 FX 链：arm + 监听、或播放、或录音。
+   一条既没 arm、也没监听、也没在播的轨道，FX 链是不跑的
+3. **录音模式的子选项**：`Record: output` 下面还有 `post fader / post-fx pre-fader / pre fx`，
+   选错了就会把推子/静音带进去
+4. **FX 的“静音自动 bypass”**：REAPER 可以按静音自动旁通 FX（右键插件名可关），
+   这条轨道在静音时会被它绕过去
+5. 还是不行就跑一次 `TAP_DEBUG_TONE=1 reaper`：插件会忽略抓音、直接输出 440 Hz 正弦。
+   这时轨道里能听到 440 Hz 就说明插件的输出通路是通的，问题在抓音；听不到就是宿主侧
 
 ## 界面
 
@@ -64,6 +79,10 @@ PipeWire 线程 ──pw_stream(sink monitor)──▶ 无锁环形缓冲 ──
 ```
 
 - 抓 monitor 用 `stream.capture.sink = true`；指定设备用 `target.object = <sink 的 node.name>`
+- 输出 buffer 的 `constant_mask` 必须自己清零。宿主从不清理这个字段，而它代表
+  「这个 block 里每个声道都是第 0 个样本的恒定值，你可以只读一个样本」。
+  REAPER 的静音优化会把输出 buffer 预标成恒定/静音；插件不清它，宿主就把我们
+  逐样本的音频按「采样保持」读成噪声——表现是**插件电平在动、轨道却像没声音**
 - 捕获跑在 PipeWire 自己的实时线程里，只做一件事：把交错立体声写进环形缓冲，不分配内存、不加锁
 - 音频线程按 60 ms 的缓冲目标微调速率，用线性插值重采样；积压超过 4 倍目标就直接跳帧
 - 界面是 X11 子窗口 + tiny-skia 软件绘制（MIT-SHM 上屏），没有 GL 依赖，Hyprland / XWayland 下都能嵌进宿主窗口
@@ -84,6 +103,10 @@ cargo run --release --example probe -- Loopback      # 抓指定 sink
 
 # 重新渲染 README 的预览图（第二个参数是 ZOOM 档位 0..5）
 cargo run --release --example preview -- docs/preview.png 1
+
+# 调试：打印 CLAP 回调；或让插件忽略抓音、直接吐 440Hz（用来判断宿主有没有采纳输出）
+TAP_DEBUG=1 reaper
+TAP_DEBUG_TONE=1 reaper
 ```
 
 ## License

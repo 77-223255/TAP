@@ -31,6 +31,26 @@ use crate::ctl::{zoom_index, Ctl, ZOOMS};
 use crate::gui::{self, Gui};
 use crate::ring::{Frame, Ring};
 
+fn debug_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("TAP_DEBUG").is_some())
+}
+
+macro_rules! dbg_log {
+    ($($t:tt)*) => {
+        if debug_enabled() {
+            eprintln!("tap: {}", format!($($t)*));
+        }
+    };
+}
+
+/// 调试用：TAP_DEBUG_TONE=1 时输出 440 Hz 正弦，忽略 PipeWire 抓音。
+/// 用途：在宿主里验证“插件的输出到底有没有被采纳”（排除抓音链路的干扰）。
+fn debug_tone_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("TAP_DEBUG_TONE").is_some())
+}
+
 const PARAM_GAIN: u32 = 1;
 const PARAM_SOURCE: u32 = 2;
 const PARAM_ZOOM: u32 = 3;
@@ -87,6 +107,7 @@ pub struct Tap {
     prev: Frame,
     cur: Frame,
     phase: f64,
+    tone_phase: f64,
     hold: [f32; 2],
     hold_age: [u32; 2],
     autostarted: bool,
@@ -157,6 +178,7 @@ impl Tap {
             prev: Frame::default(),
             cur: Frame::default(),
             phase: 1.0,
+            tone_phase: 0.0,
             hold: [0.0; 2],
             hold_age: [0; 2],
             autostarted: false,
@@ -210,6 +232,7 @@ impl Tap {
         if !self.autostarted {
             self.autostarted = true;
             self.start_selected();
+            dbg_log!("autostart requested");
         } else if self.capture.is_running() {
             // 参数自动化改了输入源：在这里落地，音频线程不碰设备列表
             let idx = self.ctl.source().max(0);
@@ -244,6 +267,7 @@ unsafe fn me<'a>(p: *const clap_plugin) -> &'a mut Tap {
 
 unsafe extern "C" fn s_init(p: *const clap_plugin) -> bool {
     let s = me(p);
+    dbg_log!("init (host_gui={})", !s.host.is_null());
     if s.host.is_null() {
         return true;
     }
@@ -263,6 +287,7 @@ unsafe extern "C" fn s_destroy(p: *const clap_plugin) {
 
 unsafe extern "C" fn s_activate(p: *const clap_plugin, sr: f64, _min: u32, _max: u32) -> bool {
     let s = me(p);
+    dbg_log!("activate sr={sr}");
     s.sr = if sr > 0.0 { sr } else { 48000.0 };
     s.ctl.set_sr(s.sr as u32);
     s.phase = 1.0;
@@ -278,6 +303,7 @@ unsafe extern "C" fn s_deactivate(p: *const clap_plugin) {
 
 unsafe extern "C" fn s_start_processing(p: *const clap_plugin) -> bool {
     let s = me(p);
+    dbg_log!("start_processing");
     s.tick();
     // 宿主可能刚从「没在处理」恢复：扔掉积压，从当前的 60ms 重新开始
     s.ring.reset();
@@ -311,7 +337,13 @@ unsafe extern "C" fn s_process(p: *const clap_plugin, proc: *const clap_process)
     if pr.audio_outputs_count == 0 || pr.frames_count == 0 {
         return 0;
     }
-    let ob = &*pr.audio_outputs;
+    // 输出 buffer 必须用可变引用：宿主从不清 constant_mask，
+    // 而我们写的是逐样本变化的数据，必须自己把它打成 0。
+    // 不清的后果：宿主以为每个 block 是恒定值，只读第 0 个样本铺满整块，
+    // 我们捕获到的音频就被“采样保持”成噪声（REAPER 的静音优化就会这样）。
+    let ob: &mut clap_audio_buffer = &mut *(pr.audio_outputs as *mut clap_audio_buffer);
+    ob.constant_mask = 0;
+    ob.latency = 0;
     if ob.channel_count == 0 || ob.data32.is_null() {
         return 0;
     }
@@ -326,6 +358,42 @@ unsafe extern "C" fn s_process(p: *const clap_plugin, proc: *const clap_process)
     };
 
     let frames = pr.frames_count as usize;
+    {
+        static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+        if ONCE.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            let in_l = if pr.audio_inputs_count > 0 && !pr.audio_inputs.is_null() {
+                let ib = &*pr.audio_inputs;
+                if ib.data32.is_null() { 0 } else { *ib.data32 as usize }
+            } else { 0 };
+            dbg_log!(
+                "process first call: frames={frames} out_ports={} out_ch={} in_ports={} in_ch={} out0={:p} out1={:p} in0={:x} out_arrays={:p}",
+                pr.audio_outputs_count,
+                ob.channel_count,
+                pr.audio_inputs_count,
+                if pr.audio_inputs_count > 0 && !pr.audio_inputs.is_null() { (&*pr.audio_inputs).channel_count } else { 0 },
+                out_l,
+                if ob.channel_count > 1 { *ob.data32.add(1) } else { std::ptr::null_mut() },
+                in_l,
+                pr.audio_outputs
+            );
+        }
+    }
+    if debug_tone_enabled() {
+        // 调试音：只用来验证宿主有没有采纳我们的输出
+        let sr = if s.sr > 0.0 { s.sr } else { 48000.0 };
+        for i in 0..frames {
+            let v = (0.4 * (std::f64::consts::TAU * 440.0 * s.tone_phase).sin()) as f32;
+            s.tone_phase += 1.0 / sr;
+            *out_l.add(i) = v;
+            if out_r != out_l {
+                *out_r.add(i) = v;
+            }
+        }
+        s.tone_phase = s.tone_phase.fract();
+        ob.constant_mask = 0;
+        return 0;
+    }
+
     let gain = 10f32.powf(s.ctl.gain_db() / 20.0);
     let host_sr = if s.sr > 0.0 { s.sr } else { 48000.0 };
     let card_sr = s.capture.rate();
@@ -407,8 +475,27 @@ unsafe extern "C" fn s_process(p: *const clap_plugin, proc: *const clap_process)
         s.ctl.set_hold(ch, s.hold[ch]);
     }
 
+    {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        static T0: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if n % 32 == 0 {
+            let mut g = T0.lock().unwrap();
+            let t0 = *g.get_or_insert_with(std::time::Instant::now);
+            dbg_log!(
+                "process #{n} t={}ms avail={} steps={} cap_rate={} running={} peak={:.3}",
+                t0.elapsed().as_millis(),
+                s.ring.available(),
+                n as f64 * 1024.0 / 48.0,
+                s.capture.rate(),
+                s.capture.is_running(),
+                peak[0].max(peak[1])
+            );
+        }
+    }
     s.ctl.set_fill(s.ring.available() as u32);
     s.ctl.set_dropped(s.capture.dropped_frames());
+    ob.constant_mask = 0;
     0
 }
 
@@ -792,6 +879,7 @@ unsafe extern "C" fn gu_get_preferred_api(
 }
 
 unsafe extern "C" fn gu_create(p: *const clap_plugin, api: *const c_char, is_floating: bool) -> bool {
+    dbg_log!("gui_create floating={is_floating}");
     if is_floating || !api_matches(api, b"x11") {
         return false;
     }
@@ -927,8 +1015,14 @@ unsafe extern "C" fn factory_create(
     let want = std::ffi::CStr::from_ptr(DESC.id);
     let got = std::ffi::CStr::from_ptr(id);
     if want != got {
+        dbg_log!(
+            "create_plugin: id mismatch, want {} got {}",
+            want.to_string_lossy(),
+            got.to_string_lossy()
+        );
         return std::ptr::null();
     }
+    dbg_log!("create_plugin ok");
     Tap::new(host)
 }
 
