@@ -17,6 +17,9 @@ use pipewire::properties::properties;
 use tap::capture::Capture;
 use tap::ring::Frame;
 
+/// 自测音频率：故意挑一个不常见的频率，方便在“别的程序也在放声音”时分辨
+const TONE_HZ: f64 = 1234.0;
+
 fn main() {
     let target = std::env::args().nth(1).unwrap_or_else(|| "Loopback".to_string());
     let cap = Capture::new();
@@ -34,11 +37,15 @@ fn main() {
     let ring = cap.ring();
     let mut f = Frame::default();
     let (mut n, mut peak) = (0u64, 0f32);
+    let mut samples: Vec<f32> = Vec::new();
     let t0 = Instant::now();
     while t0.elapsed() < Duration::from_secs(2) {
         while ring.read_one(&mut f) {
             n += 1;
             peak = peak.max(f.l.abs()).max(f.r.abs());
+            if samples.len() < 48000 * 2 {
+                samples.push(f.l);
+            }
         }
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -46,15 +53,46 @@ fn main() {
     quit.store(true, Ordering::Relaxed);
     let _ = player.join();
 
-    println!("自己放音 2 秒，捕获到 frames={n} peak={peak:.4}");
-    if n == 0 {
-        println!("PASS: 本进程的播放流被排除了，不会有回授");
+    // 只看自测那个频率的能量：别的程序在放声音也不影响判断
+    let amp = goertzel(&samples, TONE_HZ, 48000.0);
+    println!(
+        "自己放 {TONE_HZ:.0}Hz 两秒：捕获 frames={n} peak={peak:.4} · 该频率能量={amp:.4}"
+    );
+    if amp < 0.01 {
+        println!("PASS: 本进程的播放流被排除了，结构上不会有回授");
     } else {
-        println!("FAIL: 抓到了自己的输出，会啸叫！");
-        println!("（如果此时有别的声音在放，先关掉别的播放器再跑一次——");
-        println!("  这个自测只能保证「自己的播放流」没有被抓，抓不到别人的东西就没法判断）");
+        println!("FAIL: 抓到了自己的输出（{TONE_HZ:.0}Hz 出现在捕获里），会啸叫！");
         std::process::exit(1);
     }
+}
+
+/// 单频幅度（Goertzel），取最响的 1 秒窗口
+fn goertzel(samples: &[f32], freq: f64, sr: f64) -> f64 {
+    if samples.len() < 4800 {
+        return 0.0;
+    }
+    let mut best = (0usize, -1f64);
+    let mut off = 0usize;
+    while off + 4800 <= samples.len() {
+        let e: f64 = samples[off..off + 4800]
+            .iter()
+            .map(|x| (*x as f64) * (*x as f64))
+            .sum();
+        if e > best.1 {
+            best = (off, e);
+        }
+        off += 1200;
+    }
+    let w = std::f64::consts::TAU * freq / sr;
+    let c = 2.0 * w.cos();
+    let (mut s1, mut s2) = (0f64, 0f64);
+    let win = &samples[best.0..(best.0 + 48000).min(samples.len())];
+    for x in win {
+        let s0 = *x as f64 + c * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    (s1 * s1 + s2 * s2 - c * s1 * s2).max(0.0).sqrt() / (win.len() as f64 / 2.0)
 }
 
 fn play_tone(target: &str, quit: Arc<AtomicBool>) {
@@ -102,7 +140,7 @@ fn play_tone(target: &str, quit: Arc<AtomicBool>) {
                     if ch == 0 {
                         *ph += 1.0 / 48000.0;
                     }
-                    *s = (0.3 * (std::f64::consts::TAU * 440.0 * *ph).sin()) as f32;
+                    *s = (0.3 * (std::f64::consts::TAU * TONE_HZ * *ph).sin()) as f32;
                     if *ph > 1.0 {
                         *ph -= 1.0;
                     }
