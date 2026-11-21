@@ -20,11 +20,18 @@ use crate::capture::Capture;
 use crate::ctl::{zoom_index, Ctl, ZOOMS};
 
 /// 100% 缩放下的逻辑尺寸
-pub const BASE_W: f32 = 600.0;
-pub const BASE_H: f32 = 300.0;
+pub const BASE_W: f32 = 560.0;
+pub const BASE_H: f32 = 260.0;
 
-const PAD: f32 = 22.0;
 const KNOB_RANGE: f32 = 24.0;
+const KNOB_CX: f32 = 188.0;
+const KNOB_R: f32 = 64.0;
+const BAR_W: f32 = 48.0;
+const BAR_GAP: f32 = 16.0;
+const BARS_X: f32 = 336.0;
+/// 柱子的外轮廓和旋钮外圈一样高，看着才齐
+const BARS_TOP: f32 = BASE_H / 2.0 - (KNOB_R + 13.0);
+const BARS_H: f32 = (KNOB_R + 13.0) * 2.0;
 const ROW_H: f32 = 22.0;
 const SEP_H: f32 = 9.0;
 
@@ -343,6 +350,7 @@ pub struct Layout {
     knob: (f32, f32, f32),
     drag: Option<(f32, f32)>,
     menu: Option<Menu>,
+    last_press: Option<(Instant, f32, f32)>,
 }
 
 impl Default for Layout {
@@ -351,6 +359,7 @@ impl Default for Layout {
             knob: (0.0, 0.0, 0.0),
             drag: None,
             menu: None,
+            last_press: None,
         }
     }
 }
@@ -640,7 +649,20 @@ fn run_ui(ctl: Arc<Ctl>, cap: Arc<Capture>, quit: Arc<AtomicBool>, host: usize, 
                                 continue;
                             }
                             if knob_hit(&layout, x, y) {
-                                layout.drag = Some((y, ctl.gain_db()));
+                                // 双击回 0 dB
+                                let now = Instant::now();
+                                let dbl = matches!(layout.last_press, Some((t, px, py))
+                                    if now.duration_since(t) < Duration::from_millis(320)
+                                        && (px - x).abs() < 14.0
+                                        && (py - y).abs() < 14.0);
+                                layout.last_press = Some((now, x, y));
+                                if dbl {
+                                    ctl.set_gain_db(0.0);
+                                    layout.drag = None;
+                                    layout.last_press = None;
+                                } else {
+                                    layout.drag = Some((y, ctl.gain_db()));
+                                }
                             }
                         }
                         3 => {
@@ -800,19 +822,19 @@ fn push_image(conn: &RustConnection, win: u32, gc: u32, pix: &Pixmap, w: u32, h:
 fn paint(p: &mut Painter, v: &View, l: &mut Layout) {
     p.rect(0.0, 0.0, BASE_W, BASE_H, bg());
 
-    // ── 旋钮
-    let cx = PAD + 110.0;
+    // ── 旋钮（没有数字，只有指针和行程弧）
+    let cx = KNOB_CX;
     let cy = BASE_H / 2.0;
-    let kr = 62.0;
+    let kr = KNOB_R;
     l.knob = (cx, cy, kr);
     let t = ((v.gain_db + KNOB_RANGE) / (KNOB_RANGE * 2.0)).clamp(0.0, 1.0);
 
-    p.arc(cx, cy, kr + 12.0, -2.356, 2.356, line(), 1.0);
+    p.arc(cx, cy, kr + 13.0, -2.356, 2.356, line(), 1.0);
     if t > 0.002 {
         p.arc(
             cx,
             cy,
-            kr + 12.0,
+            kr + 13.0,
             -2.356,
             -2.356 + 4.712 * t,
             if v.active { accent() } else { muted() },
@@ -823,86 +845,44 @@ fn paint(p: &mut Painter, v: &View, l: &mut Layout) {
 
     let ang = -2.356 + 4.712 * t;
     p.line(
-        cx + ang.sin() * kr * 0.22,
-        cy - ang.cos() * kr * 0.22,
-        cx + ang.sin() * kr * 0.86,
-        cy - ang.cos() * kr * 0.86,
+        cx + ang.sin() * kr * 0.20,
+        cy - ang.cos() * kr * 0.20,
+        cx + ang.sin() * kr * 0.84,
+        cy - ang.cos() * kr * 0.84,
         ink(),
         2.0,
     );
     p.circle(cx, cy, 2.0, ink());
 
-    // 读数
-    let gtxt = if v.gain_db.abs() < 0.05 {
-        "0.0 dB".to_string()
-    } else {
-        format!("{:+.1} dB", v.gain_db)
-    };
-    p.text(
-        cx + kr + 38.0,
-        cy + 11.0,
-        30.0,
-        0.8,
-        &gtxt,
-        if v.active { ink() } else { muted() },
-    );
-
-    // ── 分隔线
-    p.rect(388.0, 44.0, 1.0, BASE_H - 88.0, line());
-
-    // ── 电平柱
-    let bar_w = 58.0;
-    let bar_gap = 18.0;
-    let mx = BASE_W - PAD - bar_w * 2.0 - bar_gap;
-    let mt = 44.0;
-    let mh = BASE_H - mt - 44.0;
+    // ── 两根柱子，没有刻度
     for ch in 0..2 {
-        let x = mx + ch as f32 * (bar_w + bar_gap);
-        // 底槽
-        p.rect(x, mt, bar_w, mh, Color::from_rgba8(0x12, 0x12, 0x13, 255));
-        p.rect(x, mt, bar_w, 1.0, line());
-        p.rect(x, mt + mh - 1.0, bar_w, 1.0, line());
-        p.rect(x, mt, 1.0, mh, line());
-        p.rect(x + bar_w - 1.0, mt, 1.0, mh, line());
+        let x = BARS_X + ch as f32 * (BAR_W + BAR_GAP);
+        p.rect(x, BARS_TOP, BAR_W, BARS_H, Color::from_rgba8(0x12, 0x12, 0x13, 255));
+        p.rect(x, BARS_TOP, BAR_W, 1.0, line());
+        p.rect(x, BARS_TOP + BARS_H - 1.0, BAR_W, 1.0, line());
+        p.rect(x, BARS_TOP, 1.0, BARS_H, line());
+        p.rect(x + BAR_W - 1.0, BARS_TOP, 1.0, BARS_H, line());
 
         let level = db_norm(v.meters[ch]);
         if level > 0.004 {
-            let inner = mh - 2.0;
-            let top = mt + mh - 1.0 - inner * level;
-            let bottom = mt + mh - 1.0;
-            // -6 dB 以下绿、以上橙（纯平，两段色块）
+            let inner = BARS_H - 2.0;
+            let bottom = BARS_TOP + BARS_H - 1.0;
+            let top = bottom - inner * level;
+            // -6 dB 以下绿、以上橙
             let green_top = (bottom - inner * 0.90).max(top);
-            p.rect(x + 3.0, green_top, bar_w - 6.0, bottom - green_top, green());
+            p.rect(x + 3.0, green_top, BAR_W - 6.0, bottom - green_top, green());
             if top < green_top - 0.5 {
-                p.rect(x + 3.0, top, bar_w - 6.0, green_top - top, accent());
+                p.rect(x + 3.0, top, BAR_W - 6.0, green_top - top, accent());
             }
         }
         let hold = db_norm(v.holds[ch]);
         if hold > 0.004 {
-            let hy = mt + mh - 1.0 - (mh - 2.0) * hold;
-            p.rect(x + 3.0, hy, bar_w - 6.0, 1.0, ink());
+            let hy = BARS_TOP + BARS_H - 1.0 - (BARS_H - 2.0) * hold;
+            p.rect(x + 3.0, hy, BAR_W - 6.0, 1.0, ink());
         }
     }
-    // 刻度线（放在两根柱子左边）
-    for db in [-6.0f32, -12.0, -24.0, -36.0, -48.0] {
-        let tt = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
-        let y = mt + mh - 1.0 - (mh - 2.0) * tt;
-        p.rect(mx - 11.0, y, 6.0, 1.0, line_hi());
-    }
 
-    // ── 状态灯
-    let (col, r) = if v.error.is_some() {
-        (accent(), 3.0)
-    } else if v.active && v.running {
-        (green(), 3.5)
-    } else if v.enabled {
-        (Color::from_rgba8(0x2e, 0x3a, 0x2c, 255), 3.0)
-    } else {
-        (Color::from_rgba8(0x24, 0x24, 0x26, 255), 3.0)
-    };
-    p.circle(BASE_W - PAD - 4.0, PAD + 4.0, r, col);
-
-    // ── 菜单画在最上面
+    // ── 右键菜单画在最上面
     if let Some(menu) = &l.menu {
         let h = menu.height();
         p.rect(menu.x, menu.y, menu.w, h, menu_bg());

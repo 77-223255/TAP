@@ -16,7 +16,7 @@ fn main() {
     let zoom = std::env::args()
         .nth(2)
         .and_then(|z| z.parse::<i32>().ok())
-        .unwrap_or(1)
+        .unwrap_or(2)
         .clamp(0, 5);
     let with_menu = std::env::args().nth(3).as_deref() == Some("menu");
 

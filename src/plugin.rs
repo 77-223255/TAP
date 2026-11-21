@@ -667,7 +667,7 @@ unsafe extern "C" fn pa_get_info(
             i.flags = CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_ENUM;
             i.min_value = 0.0;
             i.max_value = (ZOOMS.len() - 1) as f64;
-            i.default_value = 1.0;
+            i.default_value = 2.0;
             true
         }
         2 => {
@@ -708,7 +708,7 @@ unsafe extern "C" fn pa_value_to_text(
         PARAM_GAIN => format!("{value:+.1} dB"),
         PARAM_ZOOM => {
             let idx = value.max(0.0).round() as usize;
-            let z = ZOOMS.get(idx).copied().unwrap_or(1.0);
+            let z = ZOOMS.get(idx).copied().unwrap_or(1.5);
             format!("{:.0} %", z * 100.0)
         }
         PARAM_ENABLE => {

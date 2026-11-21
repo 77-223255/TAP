@@ -65,7 +65,7 @@ impl Ctl {
             sr: AtomicU32::new(48000),
             dropped: AtomicU64::new(0),
             error: Mutex::new(String::new()),
-            zoom: AtomicI32::new(1),
+            zoom: AtomicI32::new(2),
             zoom_dirty: AtomicBool::new(false),
             enabled: AtomicBool::new(true),
             gate: AtomicBool::new(true),
