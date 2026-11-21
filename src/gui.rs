@@ -558,7 +558,10 @@ fn build_menu(ctl: &Ctl, p: &Painter, x: f32, y: f32) -> Menu {
 }
 
 /// The Zoom levels of the submenu, anchored on the row of the `Zoom` item.
-fn build_submenu(ctl: &Ctl, p: &Painter, menu: &Menu) -> SubMenu {
+///
+/// It is created when the pointer reaches the row and dropped when it leaves
+/// both panels, so the panel never sits there covering the knob.
+fn build_submenu(ctl: &Ctl, menu: &Menu) -> SubMenu {
     let rows: Vec<Row> = ZOOMS
         .iter()
         .enumerate()
@@ -568,11 +571,7 @@ fn build_submenu(ctl: &Ctl, p: &Painter, menu: &Menu) -> SubMenu {
             on: ctl.zoom() == index as i32,
         })
         .collect();
-    let mut w = 0.0f32;
-    for r in &rows {
-        w = w.max(p.text_w_of(&r.label, 10.5, 0.2));
-    }
-    let w = w + 44.0;
+    let w = 78.0;
     let row_y = menu.y + 4.0 + ROW_H;
     let mut sub = SubMenu {
         x: menu.x + menu.w,
@@ -706,12 +705,13 @@ fn run_ui(ctl: Arc<Ctl>, cap: Arc<Capture>, quit: Arc<AtomicBool>, host: usize, 
                                 } else if let Some(i) = m.hit(x, y) {
                                     match m.rows[i].action {
                                         Some(Action::OpenZoom) => {
-                                            // 点 Zoom 就留着菜单，子菜单本来就开着
+                                            // 点 Zoom 行：开/关它自己的子菜单
                                             let mut menu = m;
-                                            if menu.sub.is_none() {
-                                                menu.sub =
-                                                    Some(build_submenu(&ctl, &painter, &menu));
-                                            }
+                                            menu.sub = if menu.sub.is_some() {
+                                                None
+                                            } else {
+                                                Some(build_submenu(&ctl, &menu))
+                                            };
                                             layout.menu = Some(menu);
                                             continue;
                                         }
@@ -746,9 +746,7 @@ fn run_ui(ctl: Arc<Ctl>, cap: Arc<Capture>, quit: Arc<AtomicBool>, host: usize, 
                             layout.menu = if layout.menu.is_some() {
                                 None
                             } else {
-                                let mut menu = build_menu(&ctl, &painter, x, y);
-                                menu.sub = Some(build_submenu(&ctl, &painter, &menu));
-                                Some(menu)
+                                Some(build_menu(&ctl, &painter, x, y))
                             };
                             layout.drag = None;
                         }
@@ -761,6 +759,23 @@ fn run_ui(ctl: Arc<Ctl>, cap: Arc<Capture>, quit: Arc<AtomicBool>, host: usize, 
                         menu.hover = menu.hit(x, y);
                         if let Some(sub) = menu.sub.as_mut() {
                             sub.hover = sub.hit(x, y);
+                        }
+                        // 和系统菜单一样：指针落在 Zoom 行或子菜单里才展开
+                        let on_zoom_row = menu
+                            .hover
+                            .map(|i| menu.rows[i].action == Some(Action::OpenZoom))
+                            .unwrap_or(false);
+                        let in_sub = menu
+                            .sub
+                            .as_ref()
+                            .map(|s| s.contains(x, y))
+                            .unwrap_or(false);
+                        if on_zoom_row || in_sub {
+                            if menu.sub.is_none() {
+                                menu.sub = Some(build_submenu(&ctl, menu));
+                            }
+                        } else {
+                            menu.sub = None;
                         }
                     } else if let Some((y0, db0)) = layout.drag {
                         let db = (db0 - (y - y0) * (KNOB_RANGE / 90.0))
@@ -1060,7 +1075,7 @@ pub fn render_png_with_menu(path: &std::path::Path, v: &View, ctl: &Ctl, mx: f32
     let mut l = Layout::default();
     let mut menu = build_menu(ctl, &p, mx, my);
     menu.hover = Some(1);
-    menu.sub = Some(build_submenu(ctl, &p, &menu));
+    menu.sub = Some(build_submenu(ctl, &menu));
     if let Some(sub) = menu.sub.as_mut() {
         sub.hover = Some(ctl.zoom().max(0) as usize);
     }
