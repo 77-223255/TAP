@@ -3,8 +3,7 @@
 //! 在 CLAP 宿主给的父窗口下建一个子窗口，CPU 画进 tiny-skia 的 Pixmap，
 //! 再优先走 MIT-SHM 推给 X11。没有 GL 依赖。
 //!
-//! 视觉：石墨灰的实体面板 —— 一点渐变、1px 高光边、内凹的槽、一颗会跟着
-//! 音频亮的实体 LED，一个青绿强调色。没有按钮：插上就在抓音。
+//! 视觉：黑底 + 橙色控制件 + 绿色状态灯。一颗旋钮、两条电平、一个开关。
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,56 +45,60 @@ pub fn size_for(scale: f32) -> (u32, u32) {
     )
 }
 
-// ------------------------------------------------------------------ 配色
+// ------------------------------------------------------------------ 配色：黑 / 橙 / 绿
 fn bg_top() -> Color {
-    Color::from_rgba8(0x1a, 0x1e, 0x23, 255)
+    Color::from_rgba8(0x14, 0x11, 0x0d, 255)
 }
 fn bg_bot() -> Color {
-    Color::from_rgba8(0x0c, 0x0e, 0x11, 255)
+    Color::from_rgba8(0x05, 0x04, 0x03, 255)
 }
 fn panel_top() -> Color {
-    Color::from_rgba8(0x25, 0x29, 0x2f, 255)
+    Color::from_rgba8(0x1e, 0x19, 0x13, 255)
 }
 fn panel_bot() -> Color {
-    Color::from_rgba8(0x17, 0x1b, 0x20, 255)
+    Color::from_rgba8(0x0d, 0x0a, 0x08, 255)
 }
 fn plate_top() -> Color {
-    Color::from_rgba8(0x2a, 0x2f, 0x36, 255)
+    Color::from_rgba8(0x26, 0x1e, 0x16, 255)
 }
 fn edge() -> Color {
-    Color::from_rgba8(0x05, 0x06, 0x08, 255)
+    Color::from_rgba8(0x00, 0x00, 0x00, 255)
 }
 fn well() -> Color {
-    Color::from_rgba8(0x08, 0x09, 0x0b, 255)
+    Color::from_rgba8(0x04, 0x03, 0x02, 255)
 }
 fn text() -> Color {
-    Color::from_rgba8(0xe9, 0xed, 0xf1, 255)
+    Color::from_rgba8(0xf2, 0xe7, 0xd6, 255)
 }
 fn dim() -> Color {
-    Color::from_rgba8(0x8b, 0x95, 0x9f, 255)
+    Color::from_rgba8(0x9c, 0x8c, 0x76, 255)
 }
 fn dim2() -> Color {
-    Color::from_rgba8(0x5c, 0x65, 0x6e, 255)
+    Color::from_rgba8(0x67, 0x5a, 0x49, 255)
 }
 fn accent() -> Color {
-    Color::from_rgba8(0x4f, 0xc3, 0xb6, 255)
+    Color::from_rgba8(0xe8, 0x8a, 0x3c, 255)
 }
 fn accent_dk() -> Color {
-    Color::from_rgba8(0x25, 0x6b, 0x64, 255)
+    Color::from_rgba8(0x8a, 0x4b, 0x1c, 255)
 }
-fn amber() -> Color {
-    Color::from_rgba8(0xd9, 0xa2, 0x5b, 255)
+fn green() -> Color {
+    Color::from_rgba8(0x6f, 0xd3, 0x5a, 255)
+}
+fn green_dk() -> Color {
+    Color::from_rgba8(0x2b, 0x66, 0x26, 255)
 }
 fn red() -> Color {
-    Color::from_rgba8(0xd0, 0x60, 0x50, 255)
+    Color::from_rgba8(0xe0, 0x52, 0x3c, 255)
 }
 fn hi_soft() -> Color {
-    Color::from_rgba8(0xff, 0xff, 0xff, 14)
+    Color::from_rgba8(0xff, 0xff, 0xff, 12)
 }
 
 // ------------------------------------------------------------------ 字体
 struct Fonts {
     regular: fontdue::Font,
+    #[allow(dead_code)]
     cjk: bool,
 }
 
@@ -135,7 +138,7 @@ impl Fonts {
     }
 }
 
-/// 字形缓存：120fps 下每帧重栅格化一百多个字太浪费
+/// 字形缓存：120fps 下每帧重栅格化太浪费
 type GlyphKey = (u32, u32); // (char, px*8)
 struct GlyphCache(HashMap<GlyphKey, (fontdue::Metrics, Vec<u8>)>);
 
@@ -162,19 +165,16 @@ struct Painter {
     fonts: Fonts,
     glyphs: GlyphCache,
     s: f32,
-    cjk: bool,
 }
 
 impl Painter {
     fn new(w: u32, h: u32, s: f32) -> Option<Self> {
         let fonts = Fonts::load()?;
-        let cjk = fonts.cjk;
         Some(Self {
             pix: Pixmap::new(w, h)?,
             fonts,
             glyphs: GlyphCache::new(),
             s,
-            cjk,
         })
     }
 
@@ -348,15 +348,15 @@ impl Painter {
             y + h - 2.0,
             w - 2.0,
             1.0,
-            Color::from_rgba8(0, 0, 0, 90),
+            Color::from_rgba8(0, 0, 0, 110),
         );
     }
 
     /// 槽：比面板更暗，顶部一道内阴影
     fn slot(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32) {
         self.round(x, y, w, h, r, well());
-        self.stroke(x, y, w, h, r, Color::from_rgba8(0, 0, 0, 200), 1.0);
-        self.fill(x + 2.0, y + 1.0, w - 4.0, 1.0, Color::from_rgba8(0, 0, 0, 160));
+        self.stroke(x, y, w, h, r, edge(), 1.0);
+        self.fill(x + 2.0, y + 1.0, w - 4.0, 1.0, Color::from_rgba8(0, 0, 0, 180));
         self.fill(
             x + 2.0,
             y + h - 2.0,
@@ -462,24 +462,16 @@ impl Painter {
 // ------------------------------------------------------------------ 视图数据
 pub struct View {
     pub running: bool,
+    pub enabled: bool,
+    pub recording: bool,
     pub gain_db: f32,
     /// 画面上显示的电平（已做过快攻慢放）
     pub meters: [f32; 2],
     pub holds: [f32; 2],
     /// LED 亮度 0..1，跟随音频
     pub led: f32,
-    pub buffer_secs: f32,
-    pub host_rate: u32,
-    pub card_rate: u32,
     pub zoom: i32,
     pub error: Option<String>,
-    pub dropped: u64,
-    /// 正在被捕获的应用名
-    pub apps: Vec<String>,
-    /// 宿主是否在录音
-    pub recording: bool,
-    /// 0 = 只在录音时输出，1 = 一直输出
-    pub mode: i32,
 }
 
 impl View {
@@ -487,19 +479,14 @@ impl View {
         let err = cap.error();
         Self {
             running: cap.is_running(),
+            enabled: ctl.enabled(),
+            recording: ctl.recording(),
             gain_db: ctl.gain_db(),
             meters: [ctl.meter(0), ctl.meter(1)],
             holds: [ctl.hold(0), ctl.hold(1)],
             led: 0.0,
-            buffer_secs: ctl.fill() as f32 / ctl.sr().max(1) as f32,
-            host_rate: ctl.sr(),
-            card_rate: cap.rate(),
             zoom: ctl.zoom(),
             error: if err.is_empty() { None } else { Some(err) },
-            dropped: cap.dropped_frames(),
-            apps: cap.apps(),
-            recording: ctl.recording(),
-            mode: ctl.mode(),
         }
     }
 }
@@ -508,9 +495,8 @@ impl View {
 pub struct Layout {
     knob: (f32, f32, f32),
     zoom_btns: Vec<(f32, f32, f32, f32, usize)>,
-    mode_btn: (f32, f32, f32, f32),
+    toggle: (f32, f32, f32, f32),
     drag: Option<(f32, f32)>,
-    last_press: Option<(Instant, f32, f32)>,
 }
 
 impl Default for Layout {
@@ -518,9 +504,8 @@ impl Default for Layout {
         Self {
             knob: (0.0, 0.0, 0.0),
             zoom_btns: Vec::new(),
-            mode_btn: (0.0, 0.0, 0.0, 0.0),
+            toggle: (0.0, 0.0, 0.0, 0.0),
             drag: None,
-            last_press: None,
         }
     }
 }
@@ -636,7 +621,6 @@ impl Shm {
             }
             return None;
         }
-        // 标记删除：最后 detach 时内核回收
         unsafe { libc::shmctl(shmid, libc::IPC_RMID, std::ptr::null_mut()) };
         Some(Self {
             seg,
@@ -724,13 +708,11 @@ fn run_ui(ctl: Arc<Ctl>, cap: Arc<Capture>, quit: Arc<AtomicBool>, host: usize, 
     let mut layout = Layout::default();
     let mut last = Instant::now() - Duration::from_secs(1);
 
-    // 画面用的快攻慢放，跟音频线程给的块级电平配合
     let mut bars = [0f32; 2];
     let mut holds = [0f32; 2];
     let mut led = 0f32;
 
     while !quit.load(Ordering::Relaxed) {
-        // 缩放在任何地方被改（界面点按、宿主、参数自动化）都在这里落地
         let want = ctl.zoom_scale();
         if (want - scale).abs() > 1e-4 {
             scale = want;
@@ -766,23 +748,11 @@ fn run_ui(ctl: Arc<Ctl>, cap: Arc<Capture>, quit: Arc<AtomicBool>, host: usize, 
                         continue;
                     }
                     let (x, y) = (b.event_x as f32 / scale, b.event_y as f32 / scale);
-                    if inside(layout.mode_btn, x, y) {
-                        ctl.set_mode(if ctl.mode() == 0 { 1 } else { 0 });
+                    if inside(layout.toggle, x, y) {
+                        ctl.set_enabled(!ctl.enabled());
+                        request_host_callback(host);
                     } else if knob_hit(&layout, x, y) {
-                        // 双击回 0 dB
-                        let now = Instant::now();
-                        let dbl = matches!(layout.last_press, Some((t, px, py))
-                            if now.duration_since(t) < Duration::from_millis(320)
-                                && (px - x).abs() < 12.0
-                                && (py - y).abs() < 12.0);
-                        layout.last_press = Some((now, x, y));
-                        if dbl {
-                            ctl.set_gain_db(0.0);
-                            layout.drag = None;
-                            layout.last_press = None;
-                        } else {
-                            layout.drag = Some((y, ctl.gain_db()));
-                        }
+                        layout.drag = Some((y, ctl.gain_db()));
                     } else if let Some(btn) = layout
                         .zoom_btns
                         .iter()
@@ -818,7 +788,7 @@ fn run_ui(ctl: Arc<Ctl>, cap: Arc<Capture>, quit: Arc<AtomicBool>, host: usize, 
             }
         }
 
-        // 120 fps 跟随音频；放大后像素多，按比例降一点，免得白烧 CPU
+        // 120 fps 跟随音频；放大后像素多，按比例降一点
         let fps = if scale >= 3.0 {
             40.0
         } else if scale >= 2.0 {
@@ -832,11 +802,10 @@ fn run_ui(ctl: Arc<Ctl>, cap: Arc<Capture>, quit: Arc<AtomicBool>, host: usize, 
             last = Instant::now();
 
             let mut v = View::from_state(&ctl, &cap);
-            // 快攻慢放：峰值立刻跟上，回落按时间常数衰减（约 300ms）
             let decay = (-dt / 0.30).exp();
             for ch in 0..2 {
                 let peak = v.meters[ch];
-                bars[ch] = bars[ch] * decay;
+                bars[ch] *= decay;
                 if peak > bars[ch] {
                     bars[ch] = peak;
                 }
@@ -848,11 +817,11 @@ fn run_ui(ctl: Arc<Ctl>, cap: Arc<Capture>, quit: Arc<AtomicBool>, host: usize, 
             }
             v.meters = bars;
             v.holds = holds;
-            // LED 跟音频走：对数刻度，带一点点不规则的抖动，像真的 LED
+
             let peak = bars[0].max(bars[1]);
-            let target = if v.running { db_norm(peak) } else { 0.0 };
+            let target = if v.enabled && v.running { db_norm(peak) } else { 0.0 };
             led += (target - led) * (1.0 - (-dt / 0.06).exp());
-            let flicker = if v.running && target > 0.01 {
+            let flicker = if v.enabled && target > 0.01 {
                 let t = last.elapsed().as_secs_f32();
                 0.92 + 0.08 * (t * 91.0).sin() * (t * 37.0).sin()
             } else {
@@ -886,7 +855,6 @@ fn to_bgrx(pix: &Pixmap, dst: &mut [u8]) {
         let (r, g, b) = if a == 255 || a == 0 {
             (r, g, b)
         } else {
-            // tiny-skia 是预乘 alpha，X11 要非预乘
             let f = 255.0 / a as f32;
             (
                 (r as f32 * f).min(255.0) as u8,
@@ -959,85 +927,15 @@ fn paint(p: &mut Painter, v: &View, l: &mut Layout) {
     // ───────── 顶栏
     p.vgrad(0.0, 0.0, BASE_W, HEADER_H, plate_top(), panel_bot());
     p.fill(0.0, HEADER_H - 1.0, BASE_W, 1.0, edge());
-    p.fill(0.0, 0.0, BASE_W, 1.0, Color::from_rgba8(255, 255, 255, 18));
+    p.fill(0.0, HEADER_H - 2.0, BASE_W, 1.0, Color::from_rgba8(0xe8, 0x8a, 0x3c, 40));
+    p.text_b(PAD, 43.0, 30.0, 4.2, "TAP", text());
 
-    p.text_b(PAD, 36.0, 25.0, 3.4, "TAP", text());
-    p.text(PAD, 52.0, 8.0, 1.9, "SYSTEM AUDIO → TRACK", dim2());
-
-    // 状态：实体 LED + 文字
-    let rec_only = v.mode == 0;
-    let active = if rec_only { v.recording } else { v.running };
-    let (status, status_col) = if v.error.is_some() {
-        ("ERROR", amber())
-    } else if rec_only && v.recording {
-        ("REC", accent())
-    } else if rec_only {
-        ("ARMED", dim2())
-    } else if v.running {
-        ("LIVE", accent())
-    } else {
-        ("IDLE", dim2())
-    };
-    p.text_right(BASE_W - PAD, 26.0, 9.0, 1.6, status, status_col);
-    let sw = p.text_w_of(status, 9.0, 1.6);
-    let led_x = BASE_W - PAD - sw - 12.0;
-    draw_led(
-        p,
-        led_x,
-        22.5,
-        v.led,
-        active && v.error.is_none(),
-    );
-
-    // 输出模式开关：REC ONLY / ALWAYS
-    let (mx0, mw) = (238.0f32, 92.0f32);
-    let my = 30.0f32;
-    p.text_right(mx0 - 8.0, 43.0, 7.5, 1.4, "MODE", dim2());
-    l.mode_btn = (mx0, my, mw, 17.0);
-    p.round(mx0, my, mw, 17.0, 3.0, Color::from_rgba8(0x1b, 0x1f, 0x24, 255));
-    p.stroke(mx0, my, mw, 17.0, 3.0, Color::from_rgba8(0, 0, 0, 140), 1.0);
-    if rec_only {
-        p.round_vgrad(
-            mx0 + 2.0,
-            my + 2.0,
-            mw * 0.5 - 3.0,
-            13.0,
-            2.0,
-            Color::from_rgba8(0x31, 0x6f, 0x69, 255),
-            accent_dk(),
-        );
-    } else {
-        p.round_vgrad(
-            mx0 + mw * 0.5 + 1.0,
-            my + 2.0,
-            mw * 0.5 - 3.0,
-            13.0,
-            2.0,
-            Color::from_rgba8(0x31, 0x6f, 0x69, 255),
-            accent_dk(),
-        );
-    }
-    for (i, lab) in ["REC ONLY", "ALWAYS"].iter().enumerate() {
-        let cx = mx0 + mw * 0.5 * i as f32 + mw * 0.25;
-        let tw = p.text_w_of(lab, 7.5, 0.3);
-        let sel = (i == 0) == rec_only;
-        p.text(
-            cx - tw / 2.0 + 1.0,
-            my + 11.5,
-            7.5,
-            0.3,
-            lab,
-            if sel { text() } else { dim2() },
-        );
-    }
-
-    // 缩放档位
+    // ZOOM 档位
     let cell_w = 30.0f32;
     let gap = 3.0f32;
     let total = cell_w * 6.0 + gap * 5.0;
     let zx = BASE_W - PAD - total;
     let zy = 34.0;
-    p.text_right(zx - 8.0, 47.0, 7.5, 1.4, "ZOOM", dim2());
     l.zoom_btns.clear();
     for i in 0..6 {
         let x = zx + i as f32 * (cell_w + gap);
@@ -1049,13 +947,13 @@ fn paint(p: &mut Painter, v: &View, l: &mut Layout) {
                 cell_w,
                 17.0,
                 3.0,
-                Color::from_rgba8(0x31, 0x6f, 0x69, 255),
+                Color::from_rgba8(0xf5, 0xa4, 0x4f, 255),
                 accent_dk(),
             );
             p.stroke(x, zy, cell_w, 17.0, 3.0, edge(), 1.0);
         } else {
-            p.round(x, zy, cell_w, 17.0, 3.0, Color::from_rgba8(0x1b, 0x1f, 0x24, 255));
-            p.stroke(x, zy, cell_w, 17.0, 3.0, Color::from_rgba8(0, 0, 0, 140), 1.0);
+            p.round(x, zy, cell_w, 17.0, 3.0, Color::from_rgba8(0x1a, 0x15, 0x10, 255));
+            p.stroke(x, zy, cell_w, 17.0, 3.0, Color::from_rgba8(0, 0, 0, 160), 1.0);
         }
         let lab = ZOOM_LABELS[i];
         let tw = p.text_w_of(lab, 8.0, 0.6);
@@ -1065,53 +963,59 @@ fn paint(p: &mut Painter, v: &View, l: &mut Layout) {
             8.0,
             0.6,
             lab,
-            if sel { text() } else { dim2() },
+            if sel {
+                Color::from_rgba8(0x1a, 0x0d, 0x04, 255)
+            } else {
+                dim2()
+            },
         );
         l.zoom_btns.push((x, zy, cell_w, 17.0, i));
     }
 
+    // 状态灯
+    let active = v.enabled && v.running;
+    draw_led(
+        p,
+        BASE_W - PAD - 7.0,
+        20.0,
+        v.led,
+        active && v.error.is_none(),
+        v.error.is_some(),
+    );
+
     // ───────── 主体面板
     p.panel(PAD, BODY_Y, BODY_W, BODY_H, 6.0);
 
-    // 增益旋钮
-    let cx = PAD + 128.0;
-    let cy = BODY_Y + BODY_H / 2.0 - 4.0;
-    let kr = 48.0;
+    let cx = PAD + 124.0;
+    let cy = BODY_Y + BODY_H / 2.0;
+    let kr = 54.0;
     l.knob = (cx, cy, kr);
-
-    p.circle(cx, cy, kr + 9.0, Color::from_rgba8(0x0b, 0x0d, 0x0f, 255));
-    p.arc(cx, cy, kr + 5.0, -2.356, 2.356, Color::from_rgba8(0x33, 0x39, 0x40, 255), 2.0);
     let t = ((v.gain_db + KNOB_RANGE) / (KNOB_RANGE * 2.0)).clamp(0.0, 1.0);
+
+    // 旋钮槽 + 行程弧
+    p.circle(cx, cy, kr + 10.0, Color::from_rgba8(0x08, 0x06, 0x04, 255));
+    p.arc(cx, cy, kr + 6.0, -2.356, 2.356, Color::from_rgba8(0x3a, 0x2e, 0x22, 255), 2.0);
     if t > 0.002 {
-        let a0 = -2.356;
-        let a1 = a0 + 4.712 * t;
-        if v.gain_db.abs() < 0.5 {
-            p.arc(cx, cy, kr + 5.0, a0, a1, dim(), 2.0);
-        } else {
-            p.arc(cx, cy, kr + 5.0, a0, a1, accent(), 2.0);
-        }
+        let col = if v.enabled { accent() } else { dim2() };
+        p.arc(cx, cy, kr + 6.0, -2.356, -2.356 + 4.712 * t, col, 2.5);
     }
 
     // 刻度
     for k in 0..9 {
         let a = -2.356 + 4.712 * (k as f32 / 8.0);
-        let r0 = kr + 11.0;
-        let r1 = if k == 4 { kr + 16.0 } else { kr + 13.5 };
+        let r0 = kr + 12.0;
+        let r1 = if k == 4 { kr + 17.0 } else { kr + 14.5 };
         p.line(
             cx + a.sin() * r0,
             cy - a.cos() * r0,
             cx + a.sin() * r1,
             cy - a.cos() * r1,
-            if k == 4 {
-                dim()
-            } else {
-                Color::from_rgba8(0x3d, 0x45, 0x4d, 255)
-            },
+            if k == 4 { dim() } else { Color::from_rgba8(0x44, 0x38, 0x2b, 255) },
             1.0,
         );
     }
 
-    // 旋钮本体：径向渐变，左上亮
+    // 旋钮本体
     {
         let s = p.s;
         let mut pb = PathBuilder::new();
@@ -1123,9 +1027,9 @@ fn paint(p: &mut Painter, v: &View, l: &mut Layout) {
                 Point::from_xy(cx * s, cy * s),
                 kr * 1.35 * s,
                 vec![
-                    tiny_skia::GradientStop::new(0.0, Color::from_rgba8(0x4a, 0x52, 0x5b, 255)),
-                    tiny_skia::GradientStop::new(0.55, Color::from_rgba8(0x2c, 0x32, 0x39, 255)),
-                    tiny_skia::GradientStop::new(1.0, Color::from_rgba8(0x14, 0x17, 0x1b, 255)),
+                    tiny_skia::GradientStop::new(0.0, Color::from_rgba8(0x4a, 0x3b, 0x2c, 255)),
+                    tiny_skia::GradientStop::new(0.55, Color::from_rgba8(0x2a, 0x22, 0x19, 255)),
+                    tiny_skia::GradientStop::new(1.0, Color::from_rgba8(0x11, 0x0d, 0x09, 255)),
                 ],
                 SpreadMode::Pad,
                 Transform::identity(),
@@ -1144,40 +1048,31 @@ fn paint(p: &mut Painter, v: &View, l: &mut Layout) {
         kr - 0.5,
         -3.1416,
         3.1416,
-        Color::from_rgba8(0, 0, 0, 120),
+        Color::from_rgba8(0, 0, 0, 140),
         1.0,
     );
-    // 指针
     {
         let ang = -2.356 + 4.712 * t;
         let (sx, sy) = (cx + ang.sin() * kr * 0.30, cy - ang.cos() * kr * 0.30);
         let (ex, ey) = (cx + ang.sin() * kr * 0.86, cy - ang.cos() * kr * 0.86);
-        p.line(sx, sy, ex, ey, text(), 2.4);
+        p.line(sx, sy, ex, ey, if v.enabled { text() } else { dim() }, 2.6);
     }
-    p.circle(cx, cy, kr * 0.15, Color::from_rgba8(0x39, 0x40, 0x48, 255));
+    p.circle(cx, cy, kr * 0.14, Color::from_rgba8(0x3a, 0x2f, 0x24, 255));
 
-    // 旋钮右侧：读数
-    let tx = cx + kr + 54.0;
-    p.text(tx, cy - 26.0, 8.0, 1.9, "GAIN", dim2());
+    // 读数
     let gtxt = if v.gain_db.abs() < 0.05 {
         "0.0 dB".to_string()
     } else {
         format!("{:+.1} dB", v.gain_db)
     };
-    p.text_b(tx - 1.0, cy + 4.0, 22.0, 0.4, &gtxt, text());
-    if p.cjk {
-        p.text(tx, cy + 26.0, 9.0, 0.3, "双击回 0 dB", dim2());
-    } else {
-        p.text(tx, cy + 26.0, 9.0, 0.3, "double-click → 0 dB", dim2());
-    }
+    p.text_b(cx + kr + 52.0, cy + 9.0, 26.0, 0.6, &gtxt, if v.enabled { text() } else { dim() });
 
     // ───────── 电平表
-    let bar_w = 52.0;
-    let bar_gap = 14.0;
-    let mx = BASE_W - PAD - 34.0 - bar_w * 2.0 - bar_gap;
-    let mt = BODY_Y + 24.0;
-    let mh = BODY_H - 62.0;
-    p.text(mx, mt - 9.0, 7.5, 1.4, "LEVEL · dB", dim2());
+    let bar_w = 50.0;
+    let bar_gap = 13.0;
+    let mx = BASE_W - PAD - 24.0 - bar_w * 2.0 - bar_gap;
+    let mt = BODY_Y + 22.0;
+    let mh = BODY_H - 44.0;
     for ch in 0..2 {
         let x = mx + ch as f32 * (bar_w + bar_gap);
         p.slot(x, mt, bar_w, mh, 3.0);
@@ -1190,10 +1085,9 @@ fn paint(p: &mut Painter, v: &View, l: &mut Layout) {
                     Point::from_xy(0.0, (mt + mh) * s),
                     Point::from_xy(0.0, mt * s),
                     vec![
-                        tiny_skia::GradientStop::new(0.0, Color::from_rgba8(0x27, 0x66, 0x60, 255)),
-                        tiny_skia::GradientStop::new(0.74, accent()),
-                        tiny_skia::GradientStop::new(0.87, accent()),
-                        tiny_skia::GradientStop::new(0.95, amber()),
+                        tiny_skia::GradientStop::new(0.0, green_dk()),
+                        tiny_skia::GradientStop::new(0.70, green()),
+                        tiny_skia::GradientStop::new(0.93, accent()),
                         tiny_skia::GradientStop::new(1.0, red()),
                     ],
                     SpreadMode::Pad,
@@ -1220,99 +1114,87 @@ fn paint(p: &mut Painter, v: &View, l: &mut Layout) {
                 hy - 1.0,
                 bar_w - 4.0,
                 1.5,
-                Color::from_rgba8(255, 255, 255, 150),
+                Color::from_rgba8(0xf2, 0xe7, 0xd6, 150),
             );
         }
-        let db = norm_db(level);
-        let txt = if db < -79.0 {
-            "-∞".to_string()
-        } else {
-            format!("{db:.0}")
-        };
-        p.text_right(x + bar_w, mt + mh + 14.0, 8.5, 0.4, &txt, dim());
     }
+    // 只留刻度线
     for db in [-6.0f32, -12.0, -24.0, -36.0, -48.0] {
         let t = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
         let y = mt + mh * (1.0 - t);
-        p.fill(mx - 4.0, y, 3.0, 1.0, Color::from_rgba8(0x3b, 0x42, 0x4a, 255));
-        p.text(
-            mx + bar_w * 2.0 + bar_gap + 6.0,
-            y + 3.0,
-            7.0,
-            0.2,
-            &format!("{db:.0}"),
-            dim2(),
+        p.fill(mx - 5.0, y, 3.0, 1.0, Color::from_rgba8(0x4a, 0x3c, 0x2d, 255));
+        p.fill(
+            mx + bar_w * 2.0 + bar_gap + 2.0,
+            y,
+            3.0,
+            1.0,
+            Color::from_rgba8(0x4a, 0x3c, 0x2d, 255),
         );
     }
 
-    // ───────── 底栏
-    // 正在抓谁：所有应用播放流（宿主的输出被排除，所以不会啸叫）
-    let apps_line = if v.apps.is_empty() {
-        if p.cjk {
-            "APPS · 没有应用在放声音".to_string()
-        } else {
-            "APPS · nothing playing".to_string()
-        }
+    // ───────── 底栏：一个开关
+    let bh = 38.0;
+    let by = BASE_H - FOOTER_H + 8.0;
+    l.toggle = (PAD, by, 138.0, bh);
+    if v.enabled {
+        p.round_vgrad(
+            PAD,
+            by,
+            138.0,
+            bh,
+            5.0,
+            Color::from_rgba8(0xf5, 0xa4, 0x4f, 255),
+            Color::from_rgba8(0xa8, 0x5a, 0x20, 255),
+        );
+        p.stroke(PAD, by, 138.0, bh, 5.0, edge(), 1.0);
+        p.fill(PAD + 1.0, by + 1.0, 136.0, 1.0, Color::from_rgba8(255, 255, 255, 60));
+        p.circle(PAD + 24.0, by + bh / 2.0, 4.0, Color::from_rgba8(0x2a, 0x10, 0x04, 200));
+        p.text(
+            PAD + 40.0,
+            by + 24.0,
+            13.0,
+            1.6,
+            "STOP",
+            Color::from_rgba8(0x1a, 0x0d, 0x04, 255),
+        );
     } else {
-        let mut names = v.apps.join(", ");
-        if names.chars().count() > 46 {
-            names = format!("{} 等 {} 个", v.apps[0], v.apps.len());
-        }
-        format!("APPS · {names}")
-    };
-    let shown = truncate(p, &apps_line, 300.0, 9.0, 0.4);
-    p.text(PAD, BASE_H - 30.0, 9.0, 0.4, &shown, dim2());
-    let ms = v.buffer_secs * 1000.0;
-    p.text(
-        PAD,
-        BASE_H - 15.0,
-        8.5,
-        0.9,
-        &format!("BUFFER {ms:.0} ms · DROP {}", v.dropped),
-        dim2(),
-    );
+        p.round_vgrad(
+            PAD,
+            by,
+            138.0,
+            bh,
+            5.0,
+            Color::from_rgba8(0x1d, 0x18, 0x12, 255),
+            Color::from_rgba8(0x0e, 0x0b, 0x08, 255),
+        );
+        p.stroke(PAD, by, 138.0, bh, 5.0, accent_dk(), 1.0);
+        p.fill(PAD + 1.0, by + 1.0, 136.0, 1.0, hi_soft());
+        p.circle(PAD + 24.0, by + bh / 2.0, 4.0, accent());
+        p.text(PAD + 40.0, by + 24.0, 13.0, 1.6, "START", accent());
+    }
 
-    let host = fmt_rate(v.host_rate);
-    let card = if v.card_rate == 0 {
-        "—".to_string()
-    } else {
-        fmt_rate(v.card_rate)
-    };
-    let resampled = v.card_rate != 0 && v.card_rate != v.host_rate;
-    let line1 = if resampled {
-        format!("HOST {host} · CARD {card} · RESAMPLED")
-    } else {
-        format!("HOST {host} · CARD {card}")
-    };
-    p.text_right(
-        BASE_W - PAD,
-        BASE_H - 15.0,
-        8.5,
-        0.9,
-        &line1,
-        if resampled { amber() } else { dim2() },
-    );
+    // 只有出错时才写字
     if let Some(err) = &v.error {
-        let shown = truncate(p, err, BASE_W - PAD * 2.0, 9.0, 0.4);
-        p.text_right(BASE_W - PAD, BASE_H - 30.0, 9.0, 0.4, &shown, amber());
+        let shown = truncate(p, err, BODY_W - 160.0, 9.0, 0.4);
+        p.text_right(BASE_W - PAD, by + 24.0, 9.0, 0.4, &shown, accent());
     }
 }
 
 /// 实体感的 LED：光晕随电平扩散，中心亮斑跟着闪
-fn draw_led(p: &mut Painter, cx: f32, cy: f32, level: f32, on: bool) {
-    let (r, g, b) = if on {
-        (0x4f, 0xc3, 0xb6)
+fn draw_led(p: &mut Painter, cx: f32, cy: f32, level: f32, on: bool, error: bool) {
+    let (r, g, b) = if error {
+        (0xe8, 0x8a, 0x3c)
+    } else if on {
+        (0x6f, 0xd3, 0x5a)
     } else {
-        (0x4a, 0x50, 0x57)
+        (0x3b, 0x34, 0x2a)
     };
-    // 光晕：三层，半径和浓度都跟着电平
     for (base_r, base_a) in [(10.0f32, 0.05f32), (7.0, 0.10), (5.0, 0.16)] {
         let a = (base_a * (0.4 + level)).min(1.0);
         let rr = base_r * (0.85 + 0.25 * level);
         p.circle(cx, cy, rr, Color::from_rgba8(r, g, b, (a * 255.0) as u8));
     }
-    // 灯体：暗环 + 亮面
-    p.circle(cx, cy, 3.6, Color::from_rgba8(0x0a, 0x0c, 0x0e, 255));
+    p.circle(cx, cy, 3.6, Color::from_rgba8(0x04, 0x03, 0x02, 255));
     let bright = 0.45 + 0.55 * level;
     p.circle(
         cx,
@@ -1325,20 +1207,12 @@ fn draw_led(p: &mut Painter, cx: f32, cy: f32, level: f32, on: bool) {
             255,
         ),
     );
-    // 灯体上的高光点，让它在暗色面板上像颗真的灯
     p.circle(
         cx - 0.7,
         cy - 0.9,
         0.9,
         Color::from_rgba8(255, 255, 255, (110.0 + 130.0 * level) as u8),
     );
-}
-
-fn fmt_rate(r: u32) -> String {
-    if r == 0 {
-        return "—".to_string();
-    }
-    format!("{:.1} kHz", r as f32 / 1000.0)
 }
 
 fn truncate(p: &Painter, s: &str, max_w: f32, size: f32, spacing: f32) -> String {
@@ -1366,14 +1240,6 @@ fn db_norm(v: f32) -> f32 {
     }
     let db = 20.0 * v.log10();
     ((db + 60.0) / 60.0).clamp(0.0, 1.0)
-}
-
-fn norm_db(level: f32) -> f32 {
-    if level <= 0.0 {
-        -80.0
-    } else {
-        level * 60.0 - 60.0
-    }
 }
 
 /// 把界面渲染成 PNG（README 的预览图就是这么来的）

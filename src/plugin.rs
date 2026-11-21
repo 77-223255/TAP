@@ -53,7 +53,7 @@ fn debug_tone_enabled() -> bool {
 
 const PARAM_GAIN: u32 = 1;
 const PARAM_ZOOM: u32 = 2;
-const PARAM_MODE: u32 = 3;
+const PARAM_ENABLE: u32 = 3;
 
 /// 缓冲目标：60 ms。既是延迟补偿值，也是漂移补偿的平衡点。
 const FILL_SECS: f64 = 0.060;
@@ -114,6 +114,8 @@ pub struct Tap {
     transport_seen: bool,
     recording: bool,
     gated: bool,
+    /// 宿主当前有没有在跑 FX 链
+    processing: bool,
 }
 
 impl Tap {
@@ -187,6 +189,7 @@ impl Tap {
             transport_seen: false,
             recording: false,
             gated: false,
+            processing: false,
         });
 
         let ptr = &mut *boxed as *mut Self as *mut c_void;
@@ -218,8 +221,23 @@ impl Tap {
         }
     }
 
+    /// 让 PipeWire 捕获跟着 enabled / 宿主处理状态走（主线程）
+    fn sync_capture(&mut self) {
+        let want = self.ctl.enabled() && self.processing;
+        if want != self.capture.is_running() {
+            if want {
+                self.capture.start();
+                self.ring.reset();
+                self.phase = 1.0;
+            } else {
+                self.capture.stop();
+            }
+        }
+    }
+
     /// 主线程上的杂活：状态回填 + 缩放落地。
     fn tick(&mut self) {
+        self.sync_capture();
         self.ctl.set_running(self.capture.is_running());
         self.ctl.set_error(self.capture.error());
         self.ctl.set_sr(self.sr as u32);
@@ -270,23 +288,24 @@ unsafe extern "C" fn s_activate(p: *const clap_plugin, sr: f64, _min: u32, _max:
 
 unsafe extern "C" fn s_deactivate(p: *const clap_plugin) {
     dbg_log!("deactivate");
-    me(p).capture.stop();
+    let s = me(p);
+    s.processing = false;
+    s.capture.stop();
 }
 
 unsafe extern "C" fn s_start_processing(p: *const clap_plugin) -> bool {
     let s = me(p);
     dbg_log!("start_processing");
-    // 宿主要开始处理了：开抓默认输出，把积压清掉
-    s.capture.start();
-    s.ring.reset();
-    s.phase = 1.0;
+    s.processing = true;
     s.tick();
     true
 }
 
 unsafe extern "C" fn s_stop_processing(p: *const clap_plugin) {
     dbg_log!("stop_processing");
-    me(p).capture.stop();
+    let s = me(p);
+    s.processing = false;
+    s.capture.stop();
 }
 
 unsafe extern "C" fn s_reset(p: *const clap_plugin) {
@@ -368,7 +387,7 @@ unsafe extern "C" fn s_process(p: *const clap_plugin, proc: *const clap_process)
         s.recording = flags & CLAP_TRANSPORT_IS_RECORDING != 0;
     }
     s.ctl.set_recording(s.recording);
-    let gated = s.ctl.mode() == 0 && s.transport_seen && !s.recording;
+    let gated = !s.ctl.enabled() || (s.transport_seen && !s.recording);
     if gated {
         // 不录音：只透传输入，不叠加实时捕获
         for i in 0..frames {
@@ -553,7 +572,13 @@ fn apply_param(s: &mut Tap, id: u32, value: f64) {
                 s.request_callback();
             }
         }
-        PARAM_MODE => s.ctl.set_mode(value.max(0.0).round() as i32),
+        PARAM_ENABLE => {
+            let on = value.max(0.0).round() > 0.5;
+            if on != s.ctl.enabled() {
+                s.ctl.set_enabled(on);
+                s.request_callback();
+            }
+        }
         _ => {}
     }
 }
@@ -646,12 +671,12 @@ unsafe extern "C" fn pa_get_info(
             true
         }
         2 => {
-            i.id = PARAM_MODE;
-            write_name(&mut i.name, "Output");
+            i.id = PARAM_ENABLE;
+            write_name(&mut i.name, "Capture");
             i.flags = CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_ENUM;
             i.min_value = 0.0;
             i.max_value = 1.0;
-            i.default_value = 0.0;
+            i.default_value = 1.0;
             true
         }
         _ => false,
@@ -666,7 +691,7 @@ unsafe extern "C" fn pa_get_value(p: *const clap_plugin, id: u32, out: *mut f64)
     match id {
         PARAM_GAIN => *out = s.ctl.gain_db() as f64,
         PARAM_ZOOM => *out = s.ctl.zoom() as f64,
-        PARAM_MODE => *out = s.ctl.mode() as f64,
+        PARAM_ENABLE => *out = if s.ctl.enabled() { 1.0 } else { 0.0 },
         _ => return false,
     }
     true
@@ -686,11 +711,11 @@ unsafe extern "C" fn pa_value_to_text(
             let z = ZOOMS.get(idx).copied().unwrap_or(1.0);
             format!("{:.0} %", z * 100.0)
         }
-        PARAM_MODE => {
-            if value.max(0.0).round() as i32 == 0 {
-                "Rec only".to_string()
+        PARAM_ENABLE => {
+            if value.max(0.0).round() > 0.5 {
+                "On".to_string()
             } else {
-                "Always".to_string()
+                "Off".to_string()
             }
         }
         _ => return false,
@@ -730,13 +755,13 @@ unsafe extern "C" fn pa_text_to_value(
                 Err(_) => false,
             }
         }
-        PARAM_MODE => {
+        PARAM_ENABLE => {
             let t = txt.trim().to_ascii_lowercase();
-            if t.starts_with("rec") {
-                *out = 0.0;
-                true
-            } else if t.starts_with("always") || t.starts_with("live") {
+            if t.starts_with("on") {
                 *out = 1.0;
+                true
+            } else if t.starts_with("off") {
+                *out = 0.0;
                 true
             } else {
                 false
@@ -777,7 +802,7 @@ unsafe extern "C" fn st_save(p: *const clap_plugin, stream: *const clap_ostream)
         "gain_db={}\nzoom={}\nmode={}\n",
         s.ctl.gain_db(),
         s.ctl.zoom(),
-        s.ctl.mode()
+        if s.ctl.enabled() { 1 } else { 0 }
     );
     write_stream(stream, text.as_bytes())
 }
@@ -810,9 +835,9 @@ unsafe extern "C" fn st_load(p: *const clap_plugin, stream: *const clap_istream)
                 s.ctl.set_zoom(z);
                 s.request_callback();
             }
-        } else if let Some(v) = line.strip_prefix("mode=") {
+        } else if let Some(v) = line.strip_prefix("enabled=") {
             if let Ok(m) = v.trim().parse::<i32>() {
-                s.ctl.set_mode(m);
+                s.ctl.set_enabled(m != 0);
             }
         }
     }

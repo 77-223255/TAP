@@ -18,20 +18,15 @@ fn main() {
 
     let v = View {
         running: true,
+        enabled: true,
+        recording: true,
         gain_db: -1.5,
         // 线性峰值，画出来差不多 -12 dBFS
         meters: [0.30, 0.26],
         holds: [0.36, 0.31],
         led: 0.62,
-        buffer_secs: 0.061,
-        host_rate: 48000,
-        card_rate: 48000,
         zoom,
         error: None,
-        dropped: 0,
-        apps: vec!["Chromium".to_string(), "Spotify".to_string()],
-        recording: true,
-        mode: 0,
     };
 
     match render_png(std::path::Path::new(&out), &v) {

@@ -46,8 +46,8 @@ pub struct Ctl {
     error: Mutex<String>,
     zoom: AtomicI32,
     zoom_dirty: AtomicBool,
-    /// 0 = 只在录音时输出（默认），1 = 一直输出
-    mode: AtomicI32,
+    /// 捕获开关（界面上的 START / STOP）
+    enabled: AtomicBool,
     recording: AtomicBool,
 }
 
@@ -65,7 +65,7 @@ impl Ctl {
             error: Mutex::new(String::new()),
             zoom: AtomicI32::new(1),
             zoom_dirty: AtomicBool::new(false),
-            mode: AtomicI32::new(0),
+            enabled: AtomicBool::new(true),
             recording: AtomicBool::new(false),
         }
     }
@@ -137,12 +137,12 @@ impl Ctl {
         }
     }
 
-    // ---- 输出模式 / 录音状态
-    pub fn mode(&self) -> i32 {
-        self.mode.load(Ordering::Relaxed)
+    // ---- 捕获开关 / 录音状态
+    pub fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
     }
-    pub fn set_mode(&self, v: i32) {
-        self.mode.store(v.clamp(0, 1), Ordering::Relaxed);
+    pub fn set_enabled(&self, v: bool) {
+        self.enabled.store(v, Ordering::Relaxed);
     }
     pub fn recording(&self) -> bool {
         self.recording.load(Ordering::Relaxed)
