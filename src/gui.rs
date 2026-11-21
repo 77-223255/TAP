@@ -272,8 +272,6 @@ impl Painter {
 // ------------------------------------------------------------------ 视图数据
 pub struct View {
     pub enabled: bool,
-    pub gate: bool,
-    pub recording: bool,
     pub running: bool,
     pub gain_db: f32,
     pub meters: [f32; 2],
@@ -288,8 +286,6 @@ impl View {
         let err = cap.error();
         Self {
             enabled: ctl.enabled(),
-            gate: ctl.gate(),
-            recording: ctl.recording(),
             running: cap.is_running(),
             gain_db: ctl.gain_db(),
             meters: [ctl.meter(0), ctl.meter(1)],
@@ -305,7 +301,6 @@ impl View {
 #[derive(Clone, Copy, PartialEq)]
 pub enum Action {
     ToggleCapture,
-    ToggleGate,
     SetZoom(i32),
 }
 
@@ -496,11 +491,6 @@ fn build_menu(ctl: &Ctl, p: &Painter, x: f32, y: f32) -> Menu {
             label: "Capture".into(),
             action: Some(Action::ToggleCapture),
             on: ctl.enabled(),
-        },
-        Row {
-            label: "Only while recording".into(),
-            action: Some(Action::ToggleGate),
-            on: ctl.gate(),
         },
         Row {
             label: String::new(),
@@ -735,7 +725,7 @@ fn run_ui(ctl: Arc<Ctl>, cap: Arc<Capture>, quit: Arc<AtomicBool>, host: usize, 
             }
             v.meters = bars;
             v.holds = holds;
-            v.active = v.enabled && (!v.gate || v.recording);
+            v.active = v.enabled && v.running;
 
             paint(&mut painter, &v, &mut layout);
             match shm.as_mut() {
@@ -755,7 +745,6 @@ fn run_ui(ctl: Arc<Ctl>, cap: Arc<Capture>, quit: Arc<AtomicBool>, host: usize, 
 fn apply_action(ctl: &Arc<Ctl>, a: Action) {
     match a {
         Action::ToggleCapture => ctl.set_enabled(!ctl.enabled()),
-        Action::ToggleGate => ctl.set_gate(!ctl.gate()),
         Action::SetZoom(i) => ctl.set_zoom(i),
     }
 }

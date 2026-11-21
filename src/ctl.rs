@@ -46,11 +46,8 @@ pub struct Ctl {
     error: Mutex<String>,
     zoom: AtomicI32,
     zoom_dirty: AtomicBool,
-    /// 捕获开关
+    /// 捕获开关（默认关：插上先不出声，右键菜单里打开）
     enabled: AtomicBool,
-    /// 只在录音时叠加捕获（默认开）
-    gate: AtomicBool,
-    recording: AtomicBool,
 }
 
 impl Ctl {
@@ -67,9 +64,7 @@ impl Ctl {
             error: Mutex::new(String::new()),
             zoom: AtomicI32::new(2),
             zoom_dirty: AtomicBool::new(false),
-            enabled: AtomicBool::new(true),
-            gate: AtomicBool::new(true),
-            recording: AtomicBool::new(false),
+            enabled: AtomicBool::new(false),
         }
     }
 
@@ -146,18 +141,6 @@ impl Ctl {
     }
     pub fn set_enabled(&self, v: bool) {
         self.enabled.store(v, Ordering::Relaxed);
-    }
-    pub fn gate(&self) -> bool {
-        self.gate.load(Ordering::Relaxed)
-    }
-    pub fn set_gate(&self, v: bool) {
-        self.gate.store(v, Ordering::Relaxed);
-    }
-    pub fn recording(&self) -> bool {
-        self.recording.load(Ordering::Relaxed)
-    }
-    pub fn set_recording(&self, v: bool) {
-        self.recording.store(v, Ordering::Relaxed);
     }
 
     // ---- 缩放

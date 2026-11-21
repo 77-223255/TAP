@@ -22,8 +22,6 @@ fn main() {
 
     let v = View {
         enabled: true,
-        gate: true,
-        recording: true,
         running: true,
         gain_db: -1.5,
         // 线性峰值，画出来差不多 -12 dBFS
@@ -36,7 +34,6 @@ fn main() {
 
     let ctl = Ctl::new();
     ctl.set_enabled(true);
-    ctl.set_gate(true);
     ctl.set_zoom(zoom);
 
     let r = if with_menu {

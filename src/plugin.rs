@@ -9,8 +9,8 @@ use std::sync::Arc;
 use clap_sys::audio_buffer::clap_audio_buffer;
 use clap_sys::entry::clap_plugin_entry;
 use clap_sys::events::{
-    clap_event_header, clap_event_param_value, clap_event_transport, clap_input_events,
-    clap_output_events, CLAP_EVENT_PARAM_VALUE, CLAP_EVENT_TRANSPORT, CLAP_TRANSPORT_IS_RECORDING,
+    clap_event_header, clap_event_param_value, clap_input_events, clap_output_events,
+    CLAP_EVENT_PARAM_VALUE,
 };
 use clap_sys::ext::audio_ports::*;
 use clap_sys::ext::gui::*;
@@ -110,9 +110,7 @@ pub struct Tap {
     tone_phase: f64,
     hold: [f32; 2],
     hold_age: [u32; 2],
-    /// 宿主有没有给过走带信息（没给过就别 gate，不然插件永远静音）
-    transport_seen: bool,
-    recording: bool,
+    /// 上一块是不是处于「不叠加捕获」的透传状态
     gated: bool,
     /// 宿主当前有没有在跑 FX 链
     processing: bool,
@@ -186,8 +184,6 @@ impl Tap {
             tone_phase: 0.0,
             hold: [0.0; 2],
             hold_age: [0; 2],
-            transport_seen: false,
-            recording: false,
             gated: false,
             processing: false,
         });
@@ -379,17 +375,9 @@ unsafe extern "C" fn s_process(p: *const clap_plugin, proc: *const clap_process)
         (std::ptr::null(), std::ptr::null())
     };
 
-    // ── 只在录音时输出 ──
-    // 录完之后重放工程时，如果插件还在往外吐实时声音，就会和录好的片段叠在一起，
-    // 听起来像「宿主又放了一遍」。所以默认只在 transport 处于录音状态时输出。
-    if let Some(flags) = transport_flags(pr) {
-        s.transport_seen = true;
-        s.recording = flags & CLAP_TRANSPORT_IS_RECORDING != 0;
-    }
-    s.ctl.set_recording(s.recording);
-    let gated = !s.ctl.enabled() || (s.ctl.gate() && s.transport_seen && !s.recording);
+    // 开关决定要不要叠加捕获；关掉时纯透传（这条轨原有片段照常流过）
+    let gated = !s.ctl.enabled();
     if gated {
-        // 不录音：只透传输入，不叠加实时捕获
         for i in 0..frames {
             let l = if in_l.is_null() { 0.0 } else { *in_l.add(i) };
             let r = if in_r.is_null() { l } else { *in_r.add(i) };
@@ -399,7 +387,6 @@ unsafe extern "C" fn s_process(p: *const clap_plugin, proc: *const clap_process)
                 *out_r.add(i) = r;
             }
         }
-        // 环形缓冲不动它，电平自然回落
         for ch in 0..2 {
             s.ctl.set_meter(ch, s.ctl.meter(ch) * 0.86);
             s.ctl.set_hold(ch, s.ctl.hold(ch) * 0.90);
@@ -409,7 +396,6 @@ unsafe extern "C" fn s_process(p: *const clap_plugin, proc: *const clap_process)
         return CLAP_PROCESS_CONTINUE;
     }
     if s.gated {
-        // 刚开始录：丢掉空档期间攒下的旧音频
         s.gated = false;
         s.phase = 1.0;
         s.prev = Frame::default();
@@ -539,29 +525,6 @@ unsafe fn read_events(s: &mut Tap, events: *const clap_input_events) {
     }
 }
 
-/// 读走带 flags：优先 process.transport，其次输入事件里的 transport 事件
-unsafe fn transport_flags(pr: &clap_process) -> Option<u32> {
-    if !pr.transport.is_null() {
-        return Some((*pr.transport).flags);
-    }
-    let ev = pr.in_events;
-    if ev.is_null() {
-        return None;
-    }
-    let ev = &*ev;
-    let (Some(size), Some(get)) = (ev.size, ev.get) else {
-        return None;
-    };
-    for i in 0..size(ev) {
-        let h = get(ev, i);
-        if h.is_null() || (*h).type_ != CLAP_EVENT_TRANSPORT {
-            continue;
-        }
-        return Some((*(h as *const clap_event_transport)).flags);
-    }
-    None
-}
-
 fn apply_param(s: &mut Tap, id: u32, value: f64) {
     match id {
         PARAM_GAIN => s.ctl.set_gain_db(value as f32),
@@ -676,7 +639,7 @@ unsafe extern "C" fn pa_get_info(
             i.flags = CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_ENUM;
             i.min_value = 0.0;
             i.max_value = 1.0;
-            i.default_value = 1.0;
+            i.default_value = 0.0;
             true
         }
         _ => false,
@@ -838,10 +801,6 @@ unsafe extern "C" fn st_load(p: *const clap_plugin, stream: *const clap_istream)
         } else if let Some(v) = line.strip_prefix("enabled=") {
             if let Ok(m) = v.trim().parse::<i32>() {
                 s.ctl.set_enabled(m != 0);
-            }
-        } else if let Some(v) = line.strip_prefix("gate=") {
-            if let Ok(m) = v.trim().parse::<i32>() {
-                s.ctl.set_gate(m != 0);
             }
         }
     }
